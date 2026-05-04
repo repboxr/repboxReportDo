@@ -11,6 +11,7 @@ Authors@R: c(
   )
 Description: Repbox reports only based on Stata reproduction
     no mapping with article info
+Depends: repboxDB, repboxUtils, stringi, htmltools
 License: GPL 3.0
 Encoding: UTF-8
 LazyData: true
