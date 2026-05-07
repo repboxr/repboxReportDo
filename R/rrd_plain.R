@@ -166,7 +166,8 @@ rrd_load_report_parcels = function(project_dir, parcels = list()) {
     "regcoef_so",
     "regcoef_rb",
     "reg",
-    "reg_rb"
+    "reg_rb",
+    "problem"
   )
 
   repdb_dir = file.path(project_dir, "repdb")

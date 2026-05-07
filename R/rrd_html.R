@@ -95,6 +95,7 @@ rrd_html_do = function(
 
   issue_df = rrd_html_issue_df(cmd_df, parcels = parcels, opts = opts)
   summary_df = rrd_html_summary_df(cmd_df, issue_df = issue_df, parcels = parcels, opts = opts)
+  problem_df = rrd_html_problem_df(project_dir = project_dir, parcels = parcels)
 
   html_content = htmltools::tagList(
     htmltools::tags$html(
@@ -118,7 +119,11 @@ rrd_html_do = function(
             htmltools::tags$div(
               id = "rrd-report-col",
               class = "rrd-report-col",
-              rrd_html_report_panel(issue_df, summary_df = summary_df)
+              rrd_html_report_panel(
+                issue_df,
+                summary_df = summary_df,
+                problem_df = problem_df
+              )
             )
           )
         ),
@@ -941,7 +946,7 @@ rrd_html_diff_table_html = function(df) {
 }
 
 
-rrd_html_report_panel = function(issue_df, summary_df = NULL) {
+rrd_html_report_panel = function(issue_df, summary_df = NULL, problem_df = NULL) {
   restore.point("rrd_html_report_panel")
 
   htmltools::tagList(
@@ -958,6 +963,12 @@ rrd_html_report_panel = function(issue_df, summary_df = NULL) {
         class = "rrd-report-title",
         `data-tab-target` = "rrd-report-summary",
         "Summary"
+      ),
+      htmltools::tags$button(
+        type = "button",
+        class = "rrd-report-title",
+        `data-tab-target` = "rrd-report-problems",
+        "Problems"
       )
     ),
     htmltools::tags$div(
@@ -971,6 +982,11 @@ rrd_html_report_panel = function(issue_df, summary_df = NULL) {
         id = "rrd-report-summary",
         class = "rrd-report-tab-pane",
         rrd_html_summary_panel(summary_df)
+      ),
+      htmltools::tags$div(
+        id = "rrd-report-problems",
+        class = "rrd-report-tab-pane",
+        rrd_html_problem_panel(problem_df)
       )
     )
   )
@@ -1088,6 +1104,18 @@ rrd_html_summary_df = function(cmd_df, issue_df = NULL, parcels = list(), opts =
     sum(nonreg_with_error_no_missing),
     if (is.null(issue_df)) 0L else NROW(issue_df)
   )
+
+  if (!is.null(issue_df) && NROW(issue_df) > 0 && "issue_type" %in% names(issue_df) && "issue_title" %in% names(issue_df)) {
+    reg_titles = issue_df$issue_title[issue_df$issue_type == "regcheck"]
+    reg_titles = as.character(reg_titles)
+    reg_titles = reg_titles[!is.na(reg_titles) & nzchar(reg_titles)]
+
+    if (length(reg_titles) > 0) {
+      reg_counts = sort(table(reg_titles), decreasing = TRUE)
+      items = c(items, paste0("Regcheck issue: ", names(reg_counts)))
+      values = c(values, as.integer(reg_counts))
+    }
+  }
 
   data.frame(
     item = items,
@@ -1223,6 +1251,197 @@ rrd_html_extract_dataset_names = function(txt) {
 }
 
 
+
+
+rrd_html_problem_df = function(project_dir, parcels = list()) {
+  restore.point("rrd_html_problem_df")
+
+  empty = data.frame(
+    problem_type = character(0),
+    problem_descr = character(0),
+    stringsAsFactors = FALSE
+  )
+
+  if (!is.null(parcels$problem)) {
+    df = rrd_html_normalize_problem_obj(parcels$problem)
+    if (NROW(df) > 0) {
+      return(df)
+    }
+  }
+
+  problem_dir = file.path(project_dir, "problems")
+  if (!dir.exists(problem_dir)) {
+    return(empty)
+  }
+
+  prob_files = list.files(problem_dir, pattern = "\\.Rds$", full.names = TRUE)
+  if (length(prob_files) == 0) {
+    return(empty)
+  }
+
+  parts = lapply(prob_files, function(file) {
+    rrd_html_normalize_problem_obj(readRDS(file))
+  })
+
+  parts = parts[NROW(parts) > 0]
+  if (length(parts) == 0) {
+    return(empty)
+  }
+
+  res = do.call(rbind, parts)
+  res = res[!duplicated(res[, c("problem_type", "problem_descr"), drop = FALSE]), , drop = FALSE]
+  rownames(res) = NULL
+
+  res
+}
+
+
+rrd_html_normalize_problem_obj = function(obj) {
+  restore.point("rrd_html_normalize_problem_obj")
+
+  empty = data.frame(
+    problem_type = character(0),
+    problem_descr = character(0),
+    stringsAsFactors = FALSE
+  )
+
+  if (is.null(obj)) {
+    return(empty)
+  }
+
+  if (is.list(obj) && !inherits(obj, "data.frame") && "problem" %in% names(obj)) {
+    obj = obj$problem
+  }
+
+  if (inherits(obj, "data.frame")) {
+    df = as.data.frame(obj, stringsAsFactors = FALSE)
+
+    if (!"problem_type" %in% names(df)) {
+      if ("type" %in% names(df)) {
+        df$problem_type = df$type
+      } else if (NCOL(df) >= 1) {
+        df$problem_type = df[[1]]
+      } else {
+        df$problem_type = ""
+      }
+    }
+
+    if (!"problem_descr" %in% names(df)) {
+      if ("msg" %in% names(df)) {
+        df$problem_descr = df$msg
+      } else if ("descr" %in% names(df)) {
+        df$problem_descr = df$descr
+      } else if ("description" %in% names(df)) {
+        df$problem_descr = df$description
+      } else if (NCOL(df) >= 2) {
+        df$problem_descr = df[[2]]
+      } else {
+        df$problem_descr = ""
+      }
+    }
+
+    df$problem_type = as.character(df$problem_type)
+    df$problem_descr = as.character(df$problem_descr)
+    df$problem_type[is.na(df$problem_type)] = ""
+    df$problem_descr[is.na(df$problem_descr)] = ""
+
+    df = df[nzchar(df$problem_type) | nzchar(df$problem_descr), , drop = FALSE]
+    if (NROW(df) == 0) {
+      return(empty)
+    }
+
+    df = df[, c("problem_type", "problem_descr"), drop = FALSE]
+    rownames(df) = NULL
+
+    return(df)
+  }
+
+  if (is.list(obj)) {
+    problem_type = if ("type" %in% names(obj)) obj$type else obj[[1]]
+    problem_descr = if ("msg" %in% names(obj)) {
+      obj$msg
+    } else if ("descr" %in% names(obj)) {
+      obj$descr
+    } else if ("description" %in% names(obj)) {
+      obj$description
+    } else if (length(obj) >= 2) {
+      obj[[2]]
+    } else {
+      ""
+    }
+
+    problem_type = paste0(rrd_chr_vec(problem_type), collapse = ", ")
+    problem_descr = paste0(rrd_chr_vec(problem_descr), collapse = "\n")
+
+    if (!nzchar(problem_type) && !nzchar(problem_descr)) {
+      return(empty)
+    }
+
+    return(data.frame(
+      problem_type = problem_type,
+      problem_descr = problem_descr,
+      stringsAsFactors = FALSE
+    ))
+  }
+
+  empty
+}
+
+
+rrd_html_problem_panel = function(problem_df) {
+  restore.point("rrd_html_problem_panel")
+
+  if (is.null(problem_df) || NROW(problem_df) == 0) {
+    return(htmltools::tags$div(
+      class = "rrd-no-issues",
+      htmltools::tags$h4("No run problems found"),
+      htmltools::tags$p("No problem parcel or individual problem files reported project-level run problems.")
+    ))
+  }
+
+  problem_df = as.data.frame(problem_df, stringsAsFactors = FALSE)
+
+  counts = sort(table(problem_df$problem_type), decreasing = TRUE)
+  count_rows = lapply(seq_along(counts), function(i) {
+    htmltools::tags$tr(
+      htmltools::tags$td(htmltools::htmlEscape(names(counts)[i])),
+      htmltools::tags$td(class = "rrd-summary-value", htmltools::htmlEscape(as.integer(counts[[i]])))
+    )
+  })
+
+  detail_rows = lapply(seq_len(NROW(problem_df)), function(i) {
+    htmltools::tags$tr(
+      htmltools::tags$td(htmltools::htmlEscape(problem_df$problem_type[i])),
+      htmltools::tags$td(htmltools::htmlEscape(problem_df$problem_descr[i]))
+    )
+  })
+
+  htmltools::tagList(
+    htmltools::tags$div(
+      class = "rrd-panel-intro",
+      htmltools::tags$strong(NROW(problem_df)),
+      " noted run problems"
+    ),
+    htmltools::tags$table(
+      class = "rrd-summary-table",
+      htmltools::tags$tbody(count_rows)
+    ),
+    htmltools::tags$div(
+      class = "rrd-panel-intro",
+      "Problem details"
+    ),
+    htmltools::tags$table(
+      class = "rrd-summary-table",
+      htmltools::tags$thead(
+        htmltools::tags$tr(
+          htmltools::tags$th("Type"),
+          htmltools::tags$th("Description")
+        )
+      ),
+      htmltools::tags$tbody(detail_rows)
+    )
+  )
+}
 
 rrd_html_issue_panel = function(issue_df) {
   restore.point("rrd_html_issue_panel")

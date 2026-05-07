@@ -1012,22 +1012,39 @@ rrd_html_report_panel = function(issue_df, summary_df = NULL) {
 rrd_html_summary_df = function(cmd_df, issue_df = NULL, parcels = list(), opts = rrd_opts()) {
   restore.point("rrd_html_summary_df")
 
+  empty_items = c(
+    "Included commands",
+    "Regression commands",
+    "Correct checked regressions",
+    "Regressions with regcheck issues",
+    "Regressions with missing data",
+    "Regressions with errors, no missing data",
+    "Regressions without regcheck row, no recorded error or missing data",
+    "Non-regression commands with missing data",
+    "Non-regression commands with errors, no missing data",
+    "Issues shown in issue tab"
+  )
+
   if (is.null(cmd_df) || NROW(cmd_df) == 0) {
     return(data.frame(
-      item = c(
-        "Included commands",
-        "Regression commands",
-        "Correct regressions",
-        "Regressions with issues",
-        "Commands with errors",
-        "Missing data sets"
-      ),
-      value = c(0L, 0L, 0L, 0L, 0L, 0L),
+      item = empty_items,
+      value = rep(0L, length(empty_items)),
       stringsAsFactors = FALSE
     ))
   }
 
+  get_bool_col = function(names) {
+    cols = intersect(names, names(cmd_df))
+    if (length(cols) == 0) {
+      return(rep(FALSE, NROW(cmd_df)))
+    }
+
+    Reduce(`|`, lapply(cols, function(col) rrd_as_logical(cmd_df[[col]])))
+  }
+
   is_reg = rrd_as_logical(cmd_df$is_reg)
+  missing_data = get_bool_col(c("missing_data", "run_missing_data"))
+
   has_error = vapply(seq_len(NROW(cmd_df)), function(i) {
     rrd_cmd_has_error(cmd_df[i, , drop = FALSE])
   }, logical(1))
@@ -1038,34 +1055,76 @@ rrd_html_summary_df = function(cmd_df, issue_df = NULL, parcels = list(), opts =
     rep(FALSE, NROW(cmd_df))
   }
 
-  reg_has_issue = is_reg & (has_error | has_problem_reg)
-  missing_data_df = rrd_html_missing_dataset_df(cmd_df, parcels = parcels, opts = opts)
+  cmd_runids = lapply(seq_len(NROW(cmd_df)), function(i) {
+    rrd_cmd_runids(cmd_df[i, , drop = FALSE], parcels = parcels)
+  })
+
+  regcheck_runids = integer(0)
+  if (!is.null(parcels$regcheck) && NROW(parcels$regcheck) > 0 && "runid" %in% names(parcels$regcheck)) {
+    regcheck_runids = unique(suppressWarnings(as.integer(parcels$regcheck$runid)))
+    regcheck_runids = regcheck_runids[!is.na(regcheck_runids)]
+  }
+
+  in_regcheck = vapply(cmd_runids, function(runids) {
+    any(runids %in% regcheck_runids)
+  }, logical(1))
+
+  reg_with_missing_data = is_reg & missing_data
+  reg_with_error_no_missing = is_reg & has_error & !missing_data
+  reg_in_regcheck_with_error = is_reg & in_regcheck & has_error
+  reg_without_regcheck_no_error = is_reg & !in_regcheck & !has_error & !missing_data
+
+  correct_checked_reg = is_reg &
+    in_regcheck &
+    !has_problem_reg &
+    !has_error &
+    !missing_data
+
+  nonreg_with_missing_data = !is_reg & missing_data
+  nonreg_with_error_no_missing = !is_reg & has_error & !missing_data
+
+  items = c(
+    "Included commands",
+    "Regression commands",
+    "Correct checked regressions",
+    "Regressions with regcheck issues",
+    "Regressions with missing data",
+    "Regressions with errors, no missing data",
+    "Regressions without regcheck row, no recorded error or missing data"
+  )
+
+  values = c(
+    NROW(cmd_df),
+    sum(is_reg),
+    sum(correct_checked_reg),
+    sum(is_reg & has_problem_reg),
+    sum(reg_with_missing_data),
+    sum(reg_with_error_no_missing),
+    sum(reg_without_regcheck_no_error)
+  )
+
+  if (sum(reg_in_regcheck_with_error) > 0) {
+    items = c(items, "Regressions in regcheck with errors")
+    values = c(values, sum(reg_in_regcheck_with_error))
+  }
+
+  items = c(
+    items,
+    "Non-regression commands with missing data",
+    "Non-regression commands with errors, no missing data",
+    "Issues shown in issue tab"
+  )
+
+  values = c(
+    values,
+    sum(nonreg_with_missing_data),
+    sum(nonreg_with_error_no_missing),
+    if (is.null(issue_df)) 0L else NROW(issue_df)
+  )
 
   data.frame(
-    item = c(
-      "Included commands",
-      "Regression commands",
-      "Correct regressions",
-      "Regressions with issues",
-      "Regression commands with regcheck issues",
-      "Regression commands with Stata errors",
-      "Commands with errors",
-      "Non-regression commands with errors",
-      "Issues shown in issue tab",
-      "Missing data sets"
-    ),
-    value = c(
-      NROW(cmd_df),
-      sum(is_reg),
-      sum(is_reg & !reg_has_issue),
-      sum(reg_has_issue),
-      sum(is_reg & has_problem_reg),
-      sum(is_reg & has_error),
-      sum(has_error),
-      sum(!is_reg & has_error),
-      if (is.null(issue_df)) 0L else NROW(issue_df),
-      NROW(missing_data_df)
-    ),
+    item = items,
+    value = values,
     stringsAsFactors = FALSE
   )
 }
@@ -2852,7 +2911,8 @@ body {
   border-bottom: 1px solid #dfe4ea;
 }
 
-.rrd-do-tab-btn {
+.rrd-do-tab-btn,
+.rrd-report-title {
   border: 1px solid transparent;
   border-radius: 5px;
   background: transparent;
@@ -2861,25 +2921,21 @@ body {
   cursor: pointer;
   font-size: 12px;
   white-space: nowrap;
+  font-family: inherit;
 }
 
-.rrd-do-tab-btn:hover {
+.rrd-do-tab-btn:hover,
+.rrd-report-title:hover {
   background: #edf2f7;
   color: #172b4d;
 }
 
-.rrd-do-tab-btn.active {
+.rrd-do-tab-btn.active,
+.rrd-report-title.active {
   background: #e8f2ff;
   border-color: #b7d7ff;
   color: #0b5cad;
   font-weight: 650;
-}
-
-.rrd-report-title {
-  padding: 4px 9px 5px 9px;
-  color: #0b5cad;
-  font-weight: 700;
-  border-bottom: 2px solid #2f80ed;
 }
 
 .rrd-do-tab-content,
@@ -3078,6 +3134,36 @@ body {
   border-bottom: 1px solid #edf0f4;
   background: #fff;
   font-size: 12px;
+}
+
+.rrd-summary-table {
+  width: calc(100% - 10px);
+  margin: 5px;
+  border-collapse: collapse;
+  border: 1px solid #d9dde3;
+  border-radius: 6px;
+  overflow: hidden;
+  background: #fff;
+  font-size: 12px;
+}
+
+.rrd-summary-table td {
+  padding: 5px 7px;
+  border-bottom: 1px solid #edf0f4;
+  vertical-align: top;
+}
+
+.rrd-summary-table tr:last-child td {
+  border-bottom: none;
+}
+
+.rrd-summary-value {
+  width: 1%;
+  white-space: nowrap;
+  text-align: right;
+  font-weight: 700;
+  color: #344054;
+  font-family: Menlo, Monaco, Consolas, monospace;
 }
 
 .rrd-issue-list {
@@ -3292,6 +3378,16 @@ body {
     });
   }
 
+  function activateReportTab(targetId) {
+    qsa(".rrd-report-title").forEach(function(btn) {
+      btn.classList.toggle("active", btn.getAttribute("data-tab-target") === targetId);
+    });
+
+    qsa(".rrd-report-tab-pane").forEach(function(pane) {
+      pane.classList.toggle("active", pane.id === targetId);
+    });
+  }
+
   function clearHighlights() {
     qsa(".rrd-issue-item.active").forEach(function(el) {
       el.classList.remove("active");
@@ -3325,6 +3421,15 @@ body {
     qsa(".rrd-do-tab-btn").forEach(function(btn) {
       btn.addEventListener("click", function() {
         activateDoTab(btn.getAttribute("data-file-idx"));
+      });
+    });
+
+    qsa(".rrd-report-title").forEach(function(btn) {
+      btn.addEventListener("click", function() {
+        var targetId = btn.getAttribute("data-tab-target");
+        if (targetId) {
+          activateReportTab(targetId);
+        }
       });
     });
 
@@ -3509,6 +3614,66 @@ Important: Try to always use absolute file paths in the file argument of the mod
 # Your Task
 ##################################
 
+Can you include some updates:
+
+1. In the summary tab show the numbers of different types of regcheck issues like how many: "sb vs rb coef/se mismatch", "sb vs rb SE mismatch" etc. Only show those issues types that occur at least once.
+
+2. Make a new tybe "problems" that gives an overview of noted run problems. Below is some code in another package that aggregates the problems of a project and should give you an idea how they are stored for a project. That shall be a separate tab, not mixed with the issues tab. If the problems parcels exists, load it, otherwise check for single problem files.
+
+
+
+
+repbox_store_project_problems = function(project_dir, parcels=list()) {
+  restore.point("repbox_store_project_problems")
+
+  prob_li = vector("list",0)
+
+  parcels = repdb_load_parcels(project_dir, "stata_do_run_info",parcels = parcels)
+  info = parcels$stata_do_run_info$stata_do_run_info
+  if (NROW(info)>0) {
+    num = sum(info$timeout, na.rm = TRUE)
+    if (num > 0) {
+      prob_li[[length(prob_li)+1]] = list(type="timeout", msg = paste0(num, " do files had a timeout."))
+    }
+    num = sum(info$num_load_data_err, na.rm=TRUE)
+    if (num > 0) {
+      prob_li[[length(prob_li)+1]] = list(type="missing_data", msg = paste0(num, " data load commands did not work."))
+    }
+    num = sum(info$has_parse_err, na.rm=TRUE)
+    if (num > 0) {
+      prob_li[[length(prob_li)+1]] = list(type="parse_error", msg = paste0(num, " do files had a parse errors."))
+    }
+  }
+
+
+  problem_dir = file.path(project_dir,"problems")
+  repdb_dir = file.path(project_dir,"repdb")
+  prob_files = list.files(problem_dir,full.names = TRUE)
+
+  prob_li = c(
+    prob_li,
+    lapply(prob_files, readRDS)
+  )
+  if (length(prob_li)==0) {
+    problem_rds = file.path(repdb_dir,"problem.Rds")
+    if (file.exists(problem_rds)) {
+      file.remove(problem_rds)
+    }
+    return(parcels)
+  }
+
+  prob_df = lapply(prob_li, function(x) {
+    as.data.frame(x[1:2])
+  }) %>%
+    bind_rows()
+  names(prob_df) = c("problem_type", "problem_descr")
+
+  prob_df$artid = basename(project_dir)
+
+  parcels$problem = list(problem=prob_df)
+  repdb_save_parcels(parcels["problem"],dir = repdb_dir)
+  parcels
+}
 
 
 
