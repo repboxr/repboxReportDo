@@ -15,6 +15,16 @@
     });
   }
 
+  function activateReportTab(targetId) {
+    qsa(".rrd-report-title").forEach(function(btn) {
+      btn.classList.toggle("active", btn.getAttribute("data-tab-target") === targetId);
+    });
+
+    qsa(".rrd-report-tab-pane").forEach(function(pane) {
+      pane.classList.toggle("active", pane.id === targetId);
+    });
+  }
+
   function clearHighlights() {
     qsa(".rrd-issue-item.active").forEach(function(el) {
       el.classList.remove("active");
@@ -48,6 +58,15 @@
     qsa(".rrd-do-tab-btn").forEach(function(btn) {
       btn.addEventListener("click", function() {
         activateDoTab(btn.getAttribute("data-file-idx"));
+      });
+    });
+
+    qsa(".rrd-report-title").forEach(function(btn) {
+      btn.addEventListener("click", function() {
+        var targetId = btn.getAttribute("data-tab-target");
+        if (targetId) {
+          activateReportTab(targetId);
+        }
       });
     });
 

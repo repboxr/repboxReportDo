@@ -202,6 +202,7 @@ include_files = '''
 include_files = '''
 /home/rstudio/repbox/repboxReportDo/DESCRIPTION
 /home/rstudio/repbox/repboxReportDo/R/*.R
+/home/rstudio/repbox/repboxReportDo/inst/www/*.*
 '''
 
 [[repboxReport]]

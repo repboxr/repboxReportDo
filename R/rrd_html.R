@@ -94,6 +94,7 @@ rrd_html_do = function(
   }
 
   issue_df = rrd_html_issue_df(cmd_df, parcels = parcels, opts = opts)
+  summary_df = rrd_html_summary_df(cmd_df, issue_df = issue_df, parcels = parcels, opts = opts)
 
   html_content = htmltools::tagList(
     htmltools::tags$html(
@@ -117,7 +118,7 @@ rrd_html_do = function(
             htmltools::tags$div(
               id = "rrd-report-col",
               class = "rrd-report-col",
-              rrd_html_report_panel(issue_df)
+              rrd_html_report_panel(issue_df, summary_df = summary_df)
             )
           )
         ),
@@ -409,11 +410,14 @@ rrd_html_issue_df = function(cmd_df, parcels = list(), opts = rrd_opts()) {
     line = suppressWarnings(as.integer(cmd$rrd_attach_line[1]))
     if (is.na(line)) line = NA_integer_
 
+    is_reg = isTRUE(cmd$is_reg[1])
+    show_error_issue = is_reg || isTRUE(opts$show_nonreg_issue_errors)
+
     runids = rrd_cmd_runids(cmd, parcels = parcels)
     runids_txt = if (length(runids) == 0) "" else paste0(runids, collapse = ", ")
     cmdline = if ("cmdline" %in% names(cmd)) rrd_chr_vec(cmd$cmdline[1]) else ""
 
-    if (rrd_cmd_has_error(cmd)) {
+    if (show_error_issue && rrd_cmd_has_error(cmd)) {
       err_txt = rrd_cmd_error_text(cmd)
 
       pos = pos + 1L
@@ -937,13 +941,24 @@ rrd_html_diff_table_html = function(df) {
 }
 
 
-rrd_html_report_panel = function(issue_df) {
+rrd_html_report_panel = function(issue_df, summary_df = NULL) {
   restore.point("rrd_html_report_panel")
 
   htmltools::tagList(
     htmltools::tags$div(
       class = "rrd-report-titlebar",
-      htmltools::tags$div(class = "rrd-report-title active", "Issues")
+      htmltools::tags$button(
+        type = "button",
+        class = "rrd-report-title active",
+        `data-tab-target` = "rrd-report-issues",
+        "Issues"
+      ),
+      htmltools::tags$button(
+        type = "button",
+        class = "rrd-report-title",
+        `data-tab-target` = "rrd-report-summary",
+        "Summary"
+      )
     ),
     htmltools::tags$div(
       class = "rrd-report-tab-content",
@@ -951,10 +966,262 @@ rrd_html_report_panel = function(issue_df) {
         id = "rrd-report-issues",
         class = "rrd-report-tab-pane active",
         rrd_html_issue_panel(issue_df)
+      ),
+      htmltools::tags$div(
+        id = "rrd-report-summary",
+        class = "rrd-report-tab-pane",
+        rrd_html_summary_panel(summary_df)
       )
     )
   )
 }
+
+rrd_html_summary_df = function(cmd_df, issue_df = NULL, parcels = list(), opts = rrd_opts()) {
+  restore.point("rrd_html_summary_df")
+
+  empty_items = c(
+    "Included commands",
+    "Regression commands",
+    "Correct checked regressions",
+    "Regressions with regcheck issues",
+    "Regressions with missing data",
+    "Regressions with errors, no missing data",
+    "Regressions without regcheck row, no recorded error or missing data",
+    "Non-regression commands with missing data",
+    "Non-regression commands with errors, no missing data",
+    "Issues shown in issue tab"
+  )
+
+  if (is.null(cmd_df) || NROW(cmd_df) == 0) {
+    return(data.frame(
+      item = empty_items,
+      value = rep(0L, length(empty_items)),
+      stringsAsFactors = FALSE
+    ))
+  }
+
+  get_bool_col = function(names) {
+    cols = intersect(names, names(cmd_df))
+    if (length(cols) == 0) {
+      return(rep(FALSE, NROW(cmd_df)))
+    }
+
+    Reduce(`|`, lapply(cols, function(col) rrd_as_logical(cmd_df[[col]])))
+  }
+
+  is_reg = rrd_as_logical(cmd_df$is_reg)
+  missing_data = get_bool_col(c("missing_data", "run_missing_data"))
+
+  has_error = vapply(seq_len(NROW(cmd_df)), function(i) {
+    rrd_cmd_has_error(cmd_df[i, , drop = FALSE])
+  }, logical(1))
+
+  has_problem_reg = if ("rrd_has_problem_reg" %in% names(cmd_df)) {
+    rrd_as_logical(cmd_df$rrd_has_problem_reg)
+  } else {
+    rep(FALSE, NROW(cmd_df))
+  }
+
+  cmd_runids = lapply(seq_len(NROW(cmd_df)), function(i) {
+    rrd_cmd_runids(cmd_df[i, , drop = FALSE], parcels = parcels)
+  })
+
+  regcheck_runids = integer(0)
+  if (!is.null(parcels$regcheck) && NROW(parcels$regcheck) > 0 && "runid" %in% names(parcels$regcheck)) {
+    regcheck_runids = unique(suppressWarnings(as.integer(parcels$regcheck$runid)))
+    regcheck_runids = regcheck_runids[!is.na(regcheck_runids)]
+  }
+
+  in_regcheck = vapply(cmd_runids, function(runids) {
+    any(runids %in% regcheck_runids)
+  }, logical(1))
+
+  reg_with_missing_data = is_reg & missing_data
+  reg_with_error_no_missing = is_reg & has_error & !missing_data
+  reg_in_regcheck_with_error = is_reg & in_regcheck & has_error
+  reg_without_regcheck_no_error = is_reg & !in_regcheck & !has_error & !missing_data
+
+  correct_checked_reg = is_reg &
+    in_regcheck &
+    !has_problem_reg &
+    !has_error &
+    !missing_data
+
+  nonreg_with_missing_data = !is_reg & missing_data
+  nonreg_with_error_no_missing = !is_reg & has_error & !missing_data
+
+  items = c(
+    "Included commands",
+    "Regression commands",
+    "Correct checked regressions",
+    "Regressions with regcheck issues",
+    "Regressions with missing data",
+    "Regressions with errors, no missing data",
+    "Regressions without regcheck row, no recorded error or missing data"
+  )
+
+  values = c(
+    NROW(cmd_df),
+    sum(is_reg),
+    sum(correct_checked_reg),
+    sum(is_reg & has_problem_reg),
+    sum(reg_with_missing_data),
+    sum(reg_with_error_no_missing),
+    sum(reg_without_regcheck_no_error)
+  )
+
+  if (sum(reg_in_regcheck_with_error) > 0) {
+    items = c(items, "Regressions in regcheck with errors")
+    values = c(values, sum(reg_in_regcheck_with_error))
+  }
+
+  items = c(
+    items,
+    "Non-regression commands with missing data",
+    "Non-regression commands with errors, no missing data",
+    "Issues shown in issue tab"
+  )
+
+  values = c(
+    values,
+    sum(nonreg_with_missing_data),
+    sum(nonreg_with_error_no_missing),
+    if (is.null(issue_df)) 0L else NROW(issue_df)
+  )
+
+  data.frame(
+    item = items,
+    value = values,
+    stringsAsFactors = FALSE
+  )
+}
+
+
+rrd_html_summary_panel = function(summary_df) {
+  restore.point("rrd_html_summary_panel")
+
+  if (is.null(summary_df) || NROW(summary_df) == 0) {
+    return(htmltools::tags$div(
+      class = "rrd-no-issues",
+      htmltools::tags$h4("No summary available"),
+      htmltools::tags$p("No command information was available for this report.")
+    ))
+  }
+
+  rows = lapply(seq_len(NROW(summary_df)), function(i) {
+    htmltools::tags$tr(
+      htmltools::tags$td(htmltools::htmlEscape(summary_df$item[i])),
+      htmltools::tags$td(class = "rrd-summary-value", htmltools::htmlEscape(summary_df$value[i]))
+    )
+  })
+
+  htmltools::tagList(
+    htmltools::tags$div(
+      class = "rrd-panel-intro",
+      "Brief report summary"
+    ),
+    htmltools::tags$table(
+      class = "rrd-summary-table",
+      htmltools::tags$tbody(rows)
+    )
+  )
+}
+
+
+rrd_html_missing_dataset_df = function(cmd_df, parcels = list(), opts = rrd_opts()) {
+  restore.point("rrd_html_missing_dataset_df")
+
+  empty = data.frame(
+    file = character(0),
+    file_path = character(0),
+    line = integer(0),
+    runids = character(0),
+    stringsAsFactors = FALSE
+  )
+
+  if (is.null(cmd_df) || NROW(cmd_df) == 0) return(empty)
+
+  has_error = vapply(seq_len(NROW(cmd_df)), function(i) {
+    rrd_cmd_has_error(cmd_df[i, , drop = FALSE])
+  }, logical(1))
+
+  if (!any(has_error)) return(empty)
+
+  rows = which(has_error)
+  parts = lapply(rows, function(i) {
+    cmd = cmd_df[i, , drop = FALSE]
+    txt = paste0(
+      rrd_chr_vec(cmd$cmdline[1]),
+      "\n",
+      rrd_cmd_error_text(cmd),
+      "\n",
+      rrd_cmd_log_text(cmd, parcels = parcels, opts = opts)
+    )
+
+    if (!rrd_html_has_missing_file_hint(txt)) return(NULL)
+
+    files = rrd_html_extract_dataset_names(txt)
+    if (length(files) == 0) return(NULL)
+
+    line = suppressWarnings(as.integer(cmd$rrd_attach_line[1]))
+    if (is.na(line)) line = NA_integer_
+
+    runids = rrd_cmd_runids(cmd, parcels = parcels)
+    runids_txt = if (length(runids) == 0) "" else paste0(runids, collapse = ", ")
+
+    data.frame(
+      file = files,
+      file_path = as.character(cmd$file_path[1]),
+      line = line,
+      runids = runids_txt,
+      stringsAsFactors = FALSE
+    )
+  })
+
+  parts = parts[!vapply(parts, is.null, logical(1))]
+  if (length(parts) == 0) return(empty)
+
+  res = do.call(rbind, parts)
+  res = res[!duplicated(res[, c("file", "file_path", "line"), drop = FALSE]), , drop = FALSE]
+  rownames(res) = NULL
+
+  res
+}
+
+
+rrd_html_has_missing_file_hint = function(txt) {
+  restore.point("rrd_html_has_missing_file_hint")
+
+  txt = paste0(rrd_chr_vec(txt), collapse = "\n")
+  if (!nzchar(txt)) return(FALSE)
+
+  stringi::stri_detect_regex(
+    txt,
+    "(?i)(not found|no such file|could not be opened|unable to open|r\\(601\\)|rc\\s*:?\\s*601)"
+  )
+}
+
+
+rrd_html_extract_dataset_names = function(txt) {
+  restore.point("rrd_html_extract_dataset_names")
+
+  txt = paste0(rrd_chr_vec(txt), collapse = "\n")
+  if (!nzchar(txt)) return(character(0))
+
+  mat = stringi::stri_extract_all_regex(
+    txt,
+    "(?i)[A-Za-z0-9_./\\\\ -]+\\.(dta|csv|tsv|txt|dat|raw|xls|xlsx|sav|rds|rdata)"
+  )[[1]]
+
+  if (length(mat) == 1 && is.na(mat)) return(character(0))
+
+  mat = stringi::stri_trim_both(mat)
+  mat = stringi::stri_replace_all_regex(mat, "^['\"`]+|['\"`,;:.]+$", "")
+  mat = mat[nzchar(mat)]
+
+  unique(mat)
+}
+
 
 
 rrd_html_issue_panel = function(issue_df) {

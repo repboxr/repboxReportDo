@@ -1,610 +1,130 @@
-This strongly suggests the report is **still rendering table rows**, or the CSS still contains a rule that forces table-ish elements into `display: block`.
-
-The important clue is:
-
-> If I turn off `display: block`, less vertical space, but no left alignment.
-
-That usually means the browser is still dealing with HTML like:
-
-```html
-<tr class="rrd-code-row">
-  <td class="rrd-line-num">1</td>
-  <td class="rrd-code-cell">...</td>
-</tr>
-```
-
-and CSS is trying to “repair” it with `display: block`. That is fragile. A `<tr>`/`<td>` element has special table layout behavior, and changing only `display` can leave the browser in a weird hybrid state. The correct fix is: **do not style table rows as code rows at all**. Render code rows as plain `<div>` elements and remove the old table renderer entirely.
-
-In your R file, the old function `rrd_html_do_file_pane()` still used `<tr>`, but the new compact function you added was named differently and not used. The current robust fix is to replace `rrd_html_do_file_pane()` itself, and make sure it contains **no** `tags$table`, `tags$tr`, or `tags$td`.
-
-Also clear old CSS hacks for tables. The CSS should not contain rules like:
-
-```css
-.rrd-code-table tr,
-.rrd-code-table tbody,
-.rrd-code-table td {
-  display: block;
-}
-```
-
-Use this replacement.
-
-!MODIFICATION rrd_html_do_file_pane in rrd_html.R
+!MODIFICATION rrd_html_summary_df in rrd_html.R
 scope = "function"
 file = "/home/rstudio/repbox/repboxReportDo/R/rrd_html.R"
-function_name = "rrd_html_do_file_pane"
-description = "Render source code with plain div rows instead of table/tr/td elements to avoid browser table-row height stretching."
-------------------------------------------------------------------------------------------------------------------------------------
+function_name = "rrd_html_summary_df"
+description = "Restructure the summary to distinguish missing data from other errors for regression and non-regression commands, and only show regcheck-with-error rows when nonzero."
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
 ```r
-rrd_html_do_file_pane = function(do_row, cmd_df, parcels, opts, active = FALSE) {
-  restore.point("rrd_html_do_file_pane")
+rrd_html_summary_df = function(cmd_df, issue_df = NULL, parcels = list(), opts = rrd_opts()) {
+  restore.point("rrd_html_summary_df")
 
-  file_idx = do_row$rrd_file_idx[1]
-  file_path = do_row$file_path[1]
-  txt = do_row$text[1]
-  lines = stringi::stri_split_lines1(txt)
+  empty_items = c(
+    "Included commands",
+    "Regression commands",
+    "Correct checked regressions",
+    "Regressions with regcheck issues",
+    "Regressions with missing data",
+    "Regressions with errors, no missing data",
+    "Regressions without regcheck row, no recorded error or missing data",
+    "Non-regression commands with missing data",
+    "Non-regression commands with errors, no missing data",
+    "Issues shown in issue tab"
+  )
 
-  if (length(lines) == 0) {
-    lines = ""
+  if (is.null(cmd_df) || NROW(cmd_df) == 0) {
+    return(data.frame(
+      item = empty_items,
+      value = rep(0L, length(empty_items)),
+      stringsAsFactors = FALSE
+    ))
   }
 
-  output_by_line = rrd_html_outputs_by_line(cmd_df, parcels = parcels, opts = opts)
-  line_flags = rrd_html_line_flags(cmd_df, n = length(lines))
+  get_bool_col = function(names) {
+    cols = intersect(names, names(cmd_df))
+    if (length(cols) == 0) {
+      return(rep(FALSE, NROW(cmd_df)))
+    }
 
-  line_nodes = vector("list", length(lines))
-
-  for (line_num in seq_along(lines)) {
-    key = as.character(line_num)
-    flags = line_flags[[key]]
-
-    line_class = c("rrd-code-row")
-    if (isTRUE(flags$is_reg)) line_class = c(line_class, "rrd-reg-line")
-    if (isTRUE(flags$has_error)) line_class = c(line_class, "rrd-error-line")
-    if (isTRUE(flags$has_problem_reg)) line_class = c(line_class, "rrd-problem-reg-line")
-    if (!isTRUE(flags$has_cmd)) line_class = c(line_class, "rrd-no-command-line")
-
-    extra_html = output_by_line[[key]]
-
-    line_nodes[[line_num]] = htmltools::tags$div(
-      id = paste0("rrd-line-", file_idx, "-", line_num),
-      class = paste0(line_class, collapse = " "),
-      `data-file-idx` = file_idx,
-      `data-line` = line_num,
-      htmltools::tags$span(
-        class = "rrd-line-num",
-        if (isTRUE(opts$show_line_num)) line_num else ""
-      ),
-      htmltools::tags$span(
-        class = "rrd-code-cell",
-        htmltools::tags$code(
-          class = "rrd-code-text",
-          htmltools::htmlEscape(lines[[line_num]])
-        ),
-        if (!is.null(extra_html) && nzchar(extra_html)) {
-          htmltools::HTML(extra_html)
-        } else {
-          NULL
-        }
-      )
-    )
+    Reduce(`|`, lapply(cols, function(col) rrd_as_logical(cmd_df[[col]])))
   }
 
-  pane_class = if (active) "rrd-do-tab-pane active" else "rrd-do-tab-pane"
+  is_reg = rrd_as_logical(cmd_df$is_reg)
+  missing_data = get_bool_col(c("missing_data", "run_missing_data"))
 
-  htmltools::tags$div(
-    id = paste0("rrd-do-tab-", file_idx),
-    class = pane_class,
-    `data-file-idx` = file_idx,
-    htmltools::tags$div(
-      class = "rrd-file-title",
-      htmltools::tags$span(class = "rrd-file-badge", "File"),
-      htmltools::tags$span(class = "rrd-file-path", htmltools::htmlEscape(file_path))
-    ),
-    htmltools::tags$div(
-      class = "rrd-code-lines",
-      line_nodes
-    )
+  has_error = vapply(seq_len(NROW(cmd_df)), function(i) {
+    rrd_cmd_has_error(cmd_df[i, , drop = FALSE])
+  }, logical(1))
+
+  has_problem_reg = if ("rrd_has_problem_reg" %in% names(cmd_df)) {
+    rrd_as_logical(cmd_df$rrd_has_problem_reg)
+  } else {
+    rep(FALSE, NROW(cmd_df))
+  }
+
+  cmd_runids = lapply(seq_len(NROW(cmd_df)), function(i) {
+    rrd_cmd_runids(cmd_df[i, , drop = FALSE], parcels = parcels)
+  })
+
+  regcheck_runids = integer(0)
+  if (!is.null(parcels$regcheck) && NROW(parcels$regcheck) > 0 && "runid" %in% names(parcels$regcheck)) {
+    regcheck_runids = unique(suppressWarnings(as.integer(parcels$regcheck$runid)))
+    regcheck_runids = regcheck_runids[!is.na(regcheck_runids)]
+  }
+
+  in_regcheck = vapply(cmd_runids, function(runids) {
+    any(runids %in% regcheck_runids)
+  }, logical(1))
+
+  reg_with_missing_data = is_reg & missing_data
+  reg_with_error_no_missing = is_reg & has_error & !missing_data
+  reg_in_regcheck_with_error = is_reg & in_regcheck & has_error
+  reg_without_regcheck_no_error = is_reg & !in_regcheck & !has_error & !missing_data
+
+  correct_checked_reg = is_reg &
+    in_regcheck &
+    !has_problem_reg &
+    !has_error &
+    !missing_data
+
+  nonreg_with_missing_data = !is_reg & missing_data
+  nonreg_with_error_no_missing = !is_reg & has_error & !missing_data
+
+  items = c(
+    "Included commands",
+    "Regression commands",
+    "Correct checked regressions",
+    "Regressions with regcheck issues",
+    "Regressions with missing data",
+    "Regressions with errors, no missing data",
+    "Regressions without regcheck row, no recorded error or missing data"
+  )
+
+  values = c(
+    NROW(cmd_df),
+    sum(is_reg),
+    sum(correct_checked_reg),
+    sum(is_reg & has_problem_reg),
+    sum(reg_with_missing_data),
+    sum(reg_with_error_no_missing),
+    sum(reg_without_regcheck_no_error)
+  )
+
+  if (sum(reg_in_regcheck_with_error) > 0) {
+    items = c(items, "Regressions in regcheck with errors")
+    values = c(values, sum(reg_in_regcheck_with_error))
+  }
+
+  items = c(
+    items,
+    "Non-regression commands with missing data",
+    "Non-regression commands with errors, no missing data",
+    "Issues shown in issue tab"
+  )
+
+  values = c(
+    values,
+    sum(nonreg_with_missing_data),
+    sum(nonreg_with_error_no_missing),
+    if (is.null(issue_df)) 0L else NROW(issue_df)
+  )
+
+  data.frame(
+    item = items,
+    value = values,
+    stringsAsFactors = FALSE
   )
 }
 ```
 
-!END_MODIFICATION rrd_html_do_file_pane in rrd_html.R
-
-Then replace the code-related CSS section with this. This intentionally uses `span`, not `pre`, to avoid default `<pre>` margins/padding and any inherited table/pre behavior.
-
-!MODIFICATION compact code CSS in rrd_html.css
-scope = "file"
-file = "/home/rstudio/repbox/repboxReportDo/inst/www/rrd_html.css"
-description = "Rewrite CSS with compact flex-based code rows and no table-row styling."
----------------------------------------------------------------------------------------
-
-```css
-html,
-body {
-  margin: 0;
-  padding: 0;
-  height: 100%;
-  background: #f6f7f9;
-  color: #222;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-  font-size: 13px;
-}
-
-.rrd-page {
-  height: 100vh;
-  display: flex;
-  flex-direction: column;
-}
-
-.rrd-main {
-  min-height: 0;
-  flex: 1 1 auto;
-  display: grid;
-  grid-template-columns: minmax(0, 55fr) minmax(360px, 45fr);
-  gap: 0;
-  padding: 4px;
-}
-
-.rrd-code-col,
-.rrd-report-col {
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-  background: #fff;
-  border: 1px solid #d9dde3;
-}
-
-.rrd-code-col {
-  border-radius: 7px 0 0 7px;
-  border-right: none;
-}
-
-.rrd-report-col {
-  border-radius: 0 7px 7px 0;
-}
-
-.rrd-do-tabs,
-.rrd-report-titlebar {
-  flex: 0 0 auto;
-  display: flex;
-  align-items: center;
-  gap: 3px;
-  min-height: 28px;
-  padding: 2px 4px;
-  overflow-x: auto;
-  background: #f8fafc;
-  border-bottom: 1px solid #dfe4ea;
-}
-
-.rrd-do-tab-btn {
-  border: 1px solid transparent;
-  border-radius: 5px;
-  background: transparent;
-  color: #42526e;
-  padding: 3px 7px;
-  cursor: pointer;
-  font-size: 12px;
-  white-space: nowrap;
-}
-
-.rrd-do-tab-btn:hover {
-  background: #edf2f7;
-  color: #172b4d;
-}
-
-.rrd-do-tab-btn.active {
-  background: #e8f2ff;
-  border-color: #b7d7ff;
-  color: #0b5cad;
-  font-weight: 650;
-}
-
-.rrd-report-title {
-  padding: 4px 9px 5px 9px;
-  color: #0b5cad;
-  font-weight: 700;
-  border-bottom: 2px solid #2f80ed;
-}
-
-.rrd-do-tab-content,
-.rrd-report-tab-content {
-  flex: 1 1 auto;
-  min-height: 0;
-  overflow: auto;
-}
-
-.rrd-do-tab-pane,
-.rrd-report-tab-pane {
-  display: none;
-}
-
-.rrd-do-tab-pane.active,
-.rrd-report-tab-pane.active {
-  display: block;
-}
-
-.rrd-file-title {
-  position: sticky;
-  top: 0;
-  z-index: 5;
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  min-height: 24px;
-  padding: 2px 5px;
-  background: #fff;
-  border-bottom: 1px solid #edf0f4;
-}
-
-.rrd-file-badge {
-  padding: 1px 6px;
-  border-radius: 999px;
-  background: #eef4ff;
-  color: #175cd3;
-  font-size: 11px;
-  font-weight: 650;
-}
-
-.rrd-file-path {
-  font-family: Menlo, Monaco, Consolas, monospace;
-  font-size: 11px;
-  color: #475467;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-/* Important: no table, tr, td, or pre layout for source rows. */
-
-.rrd-code-lines {
-  display: block;
-  margin: 0;
-  padding: 0;
-}
-
-.rrd-code-row {
-  display: flex;
-  align-items: flex-start;
-  margin: 0;
-  padding: 0;
-  min-height: 14px;
-  background: #fff;
-  border-bottom: 1px solid #f3f4f6;
-}
-
-.rrd-code-row:hover {
-  background: #fafcff;
-}
-
-.rrd-line-num {
-  flex: 0 0 32px;
-  width: 32px;
-  box-sizing: border-box;
-  margin: 0;
-  padding: 0 5px 0 0;
-  color: #98a2b3;
-  border-right: 1px solid #eef1f5;
-  text-align: right;
-  user-select: none;
-  font-family: Menlo, Monaco, Consolas, monospace;
-  font-size: 11px;
-  line-height: 14px;
-}
-
-.rrd-code-cell {
-  flex: 1 1 auto;
-  min-width: 0;
-  margin: 0;
-  padding: 0 0 0 2px;
-}
-
-.rrd-code-text {
-  display: block;
-  margin: 0;
-  padding: 0;
-  white-space: pre-wrap;
-  word-break: break-word;
-  text-align: left;
-  font-family: Menlo, Monaco, Consolas, monospace;
-  font-size: 11.5px;
-  line-height: 14px;
-  tab-size: 1;
-  -moz-tab-size: 1;
-}
-
-.rrd-reg-line .rrd-code-text {
-  font-weight: 700;
-  color: #17602f;
-}
-
-.rrd-error-line {
-  background: #fff7f7;
-}
-
-.rrd-error-line .rrd-line-num {
-  color: #b42318;
-}
-
-.rrd-problem-reg-line {
-  background: #fffaf0;
-}
-
-.rrd-problem-reg-line .rrd-line-num {
-  color: #b54708;
-}
-
-.rrd-active-line {
-  background: #fff1a8 !important;
-  outline: 1px solid #d9a800;
-  outline-offset: -1px;
-}
-
-.rrd-active-line .rrd-line-num {
-  color: #7a5b00;
-  font-weight: 700;
-}
-
-.rrd-output-block {
-  margin: 1px 4px 2px 0;
-  border: 1px solid #f3c77d;
-  border-radius: 5px;
-  background: #fffaf2;
-  overflow: hidden;
-}
-
-.rrd-output-block summary {
-  cursor: pointer;
-  padding: 2px 5px;
-  background: #fff7e8;
-  color: #92400e;
-  font-size: 11px;
-  line-height: 14px;
-}
-
-.rrd-output-label {
-  font-weight: 700;
-  margin-right: 6px;
-}
-
-.rrd-output-error {
-  border-color: #f2b8b5;
-  background: #fffafa;
-}
-
-.rrd-output-error summary {
-  background: #fff0f0;
-  color: #912018;
-}
-
-.rrd-output-problem {
-  border-color: #f7bd55;
-}
-
-.rrd-output-pre {
-  margin: 0;
-  padding: 4px 5px;
-  max-height: 320px;
-  overflow: auto;
-  white-space: pre-wrap;
-  word-break: break-word;
-  text-align: left;
-  font-family: Menlo, Monaco, Consolas, monospace;
-  font-size: 10.5px;
-  line-height: 13px;
-  background: transparent;
-  tab-size: 1;
-  -moz-tab-size: 1;
-}
-
-.rrd-panel-intro {
-  padding: 4px 7px;
-  color: #475467;
-  border-bottom: 1px solid #edf0f4;
-  background: #fff;
-  font-size: 12px;
-}
-
-.rrd-issue-list {
-  padding: 5px;
-}
-
-.rrd-issue-item {
-  margin-bottom: 6px;
-  border: 1px solid #e0e5ec;
-  border-left-width: 4px;
-  border-radius: 7px;
-  background: #fff;
-  cursor: pointer;
-  box-shadow: 0 1px 2px rgba(16, 24, 40, 0.04);
-}
-
-.rrd-issue-item:hover {
-  border-color: #b7d7ff;
-  box-shadow: 0 2px 7px rgba(16, 24, 40, 0.08);
-}
-
-.rrd-issue-item.active {
-  background: #fff7cf;
-  border-color: #d9a800;
-}
-
-.rrd-issue-error {
-  border-left-color: #d92d20;
-}
-
-.rrd-issue-regcheck {
-  border-left-color: #f79009;
-}
-
-.rrd-issue-main {
-  padding: 5px 7px 6px 7px;
-}
-
-.rrd-issue-head {
-  display: flex;
-  justify-content: space-between;
-  gap: 8px;
-  align-items: baseline;
-  margin-bottom: 3px;
-}
-
-.rrd-issue-title {
-  font-weight: 750;
-  color: #1f2937;
-  font-size: 13px;
-  line-height: 16px;
-}
-
-.rrd-issue-right {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  color: #667085;
-  font-size: 12px;
-  white-space: nowrap;
-}
-
-.rrd-issue-line,
-.rrd-issue-runids {
-  color: #667085;
-}
-
-.rrd-issue-cmd {
-  margin: 0 0 3px 0;
-  padding: 3px 5px;
-  border: 1px solid #edf0f4;
-  border-radius: 5px;
-  background: #f8fafc;
-  white-space: pre-wrap;
-  word-break: break-word;
-  text-align: left;
-  font-family: Menlo, Monaco, Consolas, monospace;
-  font-size: 11.5px;
-  line-height: 14px;
-  tab-size: 1;
-  -moz-tab-size: 1;
-}
-
-.rrd-issue-details {
-  margin-top: 1px;
-}
-
-.rrd-issue-details summary {
-  color: #0b5cad;
-  font-size: 12px;
-  cursor: pointer;
-  line-height: 15px;
-}
-
-.rrd-details-subtitle {
-  margin: 5px 0 3px 0;
-  font-size: 12px;
-  font-weight: 700;
-  color: #344054;
-}
-
-.rrd-details-pre {
-  margin: 3px 0 0 0;
-  max-height: 210px;
-  overflow: auto;
-  padding: 5px;
-  border: 1px solid #edf0f4;
-  border-radius: 5px;
-  background: #fbfdff;
-  white-space: pre-wrap;
-  word-break: break-word;
-  text-align: left;
-  font-family: Menlo, Monaco, Consolas, monospace;
-  font-size: 10.5px;
-  line-height: 13px;
-  tab-size: 1;
-  -moz-tab-size: 1;
-}
-
-.rrd-diff-table {
-  width: 100%;
-  border-collapse: collapse;
-  margin: 3px 0 6px 0;
-  font-size: 11.5px;
-  background: #fff;
-  border: 1px solid #d9dde3;
-  border-radius: 6px;
-  overflow: hidden;
-}
-
-.rrd-diff-table th {
-  padding: 4px 5px;
-  background: #f3f7fb;
-  border-bottom: 1px solid #d9dde3;
-  border-right: 1px solid #e3e7ed;
-  text-align: left;
-  color: #344054;
-  font-weight: 700;
-}
-
-.rrd-diff-table td {
-  padding: 4px 5px;
-  border-bottom: 1px solid #edf0f4;
-  border-right: 1px solid #edf0f4;
-  vertical-align: top;
-  font-family: Menlo, Monaco, Consolas, monospace;
-}
-
-.rrd-diff-table tr:last-child td {
-  border-bottom: none;
-}
-
-.rrd-status-bad {
-  color: #c0271c;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-  font-weight: 650;
-}
-
-.rrd-no-issues,
-.rrd-empty {
-  margin: 8px;
-  padding: 10px;
-  border: 1px dashed #cbd5e1;
-  border-radius: 8px;
-  color: #475467;
-  background: #fbfdff;
-}
-
-.rrd-no-issues h4,
-.rrd-empty h4 {
-  margin-top: 0;
-}
-
-@media (max-width: 980px) {
-  .rrd-main {
-    grid-template-columns: 1fr;
-    grid-template-rows: minmax(0, 58fr) minmax(260px, 42fr);
-  }
-
-  .rrd-code-col,
-  .rrd-report-col {
-    border: 1px solid #d9dde3;
-    border-radius: 7px;
-  }
-
-  .rrd-report-col {
-    margin-top: 4px;
-  }
-}
-```
-
-!END_MODIFICATION compact code CSS in rrd_html.css
-
-After regenerating, check the produced HTML once. Search for:
-
-```html
-<table class="rrd-code-table"
-```
-
-If that still appears, the old renderer is still being used. Search should instead find:
-
-```html
-<div class="rrd-code-lines"
-<div class="rrd-code-row"
-```
+!END_MODIFICATION rrd_html_summary_df in rrd_html.R

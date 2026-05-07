@@ -15,6 +15,7 @@ example = function() {
 #' @param only_do_with_prob_reg Shall only do files that have regressions with a regcheck problem be considered
 #' @param split_by_do Shall we generate separate output files for each do file?
 #' @param show_line_num Shall line numbers be shown before original do-file lines?
+#' @param show_nonreg_issue_errors Shall non-regression command errors be shown in the HTML issue list?
 #' @param df_exclude_vars Character vector of variables to exclude from printed data frames
 #' @param df_long_nchar Minimum number of characters after which one-row string variables are printed as long variables
 #' @param df_long_max_chars Optional maximum string length for all long variables. By default, no shortening is applied.
@@ -28,6 +29,7 @@ rrd_opts = function(
   only_do_with_prob_reg = FALSE,
   split_by_do = FALSE,
   show_line_num = TRUE,
+  show_nonreg_issue_errors = FALSE,
   df_exclude_vars = character(0),
   df_long_nchar = 10,
   df_long_max_chars = NULL,
