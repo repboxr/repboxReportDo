@@ -1,372 +1,202 @@
-You are right. The current filters rely on `cmd_df$is_reg`, so any regression that is only evidenced by `regcheck` or `reg` can be excluded before the issue list is built. The fix below enriches `cmd_df$is_reg` early, using runids from `reg`, `reg_rb`, and `regcheck`. For `regcheck`, it does not require `rb_did_run`, so regressions where `rb` was not run are still included. It only skips regcheck rows with explicit missing-data flags in common missing-data columns.
+Ah, the issue is that if the `cmd_df` dataframe doesn't contain the `missing_data` or `run_missing_data` columns, `rrd_as_logical(cmd_df$missing_data)` returns `logical(0)`, causing the `has_cmd_md` vector to be empty. This triggers an `if (NA)` evaluation when checking the runs in the loop.
 
-!MODIFICATION rrd_add_regcheck_reg_flags in rrd_plain.R
+Here is the fix for `rrd_html_summary_df` to safely handle missing columns:
+
+!MODIFICATION rrd_html_summary_df rrd_html.R
 scope = "function"
-file = "/home/rstudio/repbox/repboxReportDo/R/rrd_plain.R"
-insert_after_fun = "rrd_get_cmd_df"
-description = "Add a helper that marks commands as regressions if their runid appears in reg, reg_rb, or non-missing-data regcheck rows."
------------------------------------------------------------------------------------------------------------------------------------------
-
+file = "/home/rstudio/repbox/repboxReportDo/R/rrd_html.R"
+function_name = "rrd_html_summary_df"
+description = "Safely evaluate has_cmd_md to prevent NA/logical(0) errors if missing_data columns don't exist."
+---
 ```r
-rrd_add_regcheck_reg_flags = function(cmd_df, parcels = list()) {
-  restore.point("rrd_add_regcheck_reg_flags")
+rrd_html_summary_df = function(cmd_df, issue_df = NULL, parcels = list(), opts = rrd_opts()) {
+  restore.point("rrd_html_summary_df")
 
-  if (is.null(cmd_df)) {
-    return(cmd_df)
-  }
+  empty_items = c(
+    "Included command runs",
+    "Regression runs",
+    "Correct checked regression runs",
+    "Regression runs with regcheck issues",
+    "Regression runs with missing data",
+    "Regression runs with errors, no missing data",
+    "Regression runs without regcheck row, no recorded error or missing data",
+    "Non-regression command runs with missing data",
+    "Non-regression command runs with errors, no missing data",
+    "Issues shown in issue tab"
+  )
 
-  if (!"is_reg" %in% names(cmd_df)) {
-    cmd_df$is_reg = rep(FALSE, NROW(cmd_df))
-  }
-
-  cmd_df$is_reg = rrd_as_logical(cmd_df$is_reg)
-
-  if (NROW(cmd_df) == 0) {
-    cmd_df$rrd_is_reg_from_reg_parcel = logical(0)
-    cmd_df$rrd_is_reg_from_regcheck = logical(0)
-    return(cmd_df)
-  }
-
-  parcel_runids = function(name) {
-    df = parcels[[name]]
-    if (is.null(df) || NROW(df) == 0 || !"runid" %in% names(df)) {
-      return(integer(0))
-    }
-
-    ids = suppressWarnings(as.integer(as.data.frame(df)$runid))
-    unique(ids[!is.na(ids)])
-  }
-
-  missing_data_flag = function(df) {
-    if (is.null(df) || NROW(df) == 0) {
-      return(logical(0))
-    }
-
-    df = as.data.frame(df)
-
-    cols = intersect(
-      c(
-        "missing_data",
-        "run_missing_data",
-        "data_missing",
-        "has_missing_data",
-        "missing_dataset",
-        "missing_datasets",
-        "input_missing",
-        "no_data"
-      ),
-      names(df)
-    )
-
-    if (length(cols) == 0) {
-      return(rep(FALSE, NROW(df)))
-    }
-
-    Reduce(`|`, lapply(cols, function(col) {
-      x = df[[col]]
-
-      if (is.logical(x) || is.numeric(x) || is.integer(x)) {
-        return(rrd_as_logical(x))
-      }
-
-      x = stringi::stri_trim_both(tolower(as.character(x)))
-      x[is.na(x)] = ""
-
-      nzchar(x) & !x %in% c("false", "f", "0", "no", "n", "none", "na")
-    }))
-  }
-
-  reg_runids = unique(c(
-    parcel_runids("reg"),
-    parcel_runids("reg_rb")
-  ))
-
-  regcheck = parcels$regcheck
-  regcheck_runids = integer(0)
-
-  if (!is.null(regcheck) && NROW(regcheck) > 0 && "runid" %in% names(regcheck)) {
-    regcheck = as.data.frame(regcheck)
-    miss = missing_data_flag(regcheck)
-
-    ids = suppressWarnings(as.integer(regcheck$runid[!miss]))
-    regcheck_runids = unique(ids[!is.na(ids)])
+  if (is.null(cmd_df) || NROW(cmd_df) == 0) {
+    return(data.frame(
+      item = empty_items,
+      value = rep(0L, length(empty_items)),
+      stringsAsFactors = FALSE
+    ))
   }
 
   cmd_runids = lapply(seq_len(NROW(cmd_df)), function(i) {
     rrd_cmd_runids(cmd_df[i, , drop = FALSE], parcels = parcels)
   })
 
-  from_reg_parcel = vapply(cmd_runids, function(ids) {
-    any(ids %in% reg_runids)
-  }, logical(1))
+  n_runs = lengths(cmd_runids)
+  n_runs[n_runs == 0] = 1L # Fallback so command is at least counted once if it didn't run
 
-  from_regcheck = vapply(cmd_runids, function(ids) {
-    any(ids %in% regcheck_runids)
-  }, logical(1))
+  is_reg = rrd_as_logical(cmd_df$is_reg)
 
-  cmd_df$rrd_is_reg_from_reg_parcel = from_reg_parcel
-  cmd_df$rrd_is_reg_from_regcheck = from_regcheck
-  cmd_df$is_reg = cmd_df$is_reg | from_reg_parcel | from_regcheck
+  # Global sets to intersect
+  regcheck_runids = integer(0)
+  prob_runids = integer(0)
+  if (!is.null(parcels$regcheck) && NROW(parcels$regcheck) > 0 && "runid" %in% names(parcels$regcheck)) {
+    df = as.data.frame(parcels$regcheck)
+    regcheck_runids = unique(suppressWarnings(as.integer(df$runid)))
+    regcheck_runids = regcheck_runids[!is.na(regcheck_runids)]
 
-  cmd_df
-}
-```
+    has_problem = rep(FALSE, NROW(df))
+    if ("reg_ok" %in% names(df)) has_problem = has_problem | !rrd_as_logical(df$reg_ok)
+    if ("problem" %in% names(df)) has_problem = has_problem | (!is.na(df$problem) & nzchar(as.character(df$problem)))
+    if ("comment" %in% names(df)) has_problem = has_problem | (!is.na(df$comment) & nzchar(as.character(df$comment)))
+    prob_runids = unique(suppressWarnings(as.integer(df$runid[has_problem])))
+    prob_runids = prob_runids[!is.na(prob_runids)]
+  }
 
-!END_MODIFICATION rrd_add_regcheck_reg_flags in rrd_plain.R
-
-!MODIFICATION rrd_plain_do in rrd_plain.R
-scope = "function"
-file = "/home/rstudio/repbox/repboxReportDo/R/rrd_plain.R"
-function_name = "rrd_plain_do"
-description = "Mark regcheck and reg parcel commands as regressions before filtering do files and building the report."
------------------------------------------------------------------------------------------------------------------------
-
-```r
-# A plain text "report" that shows original do files combined with selected
-# output information as specified by opts.
-#
-# The plain version is mainly intended as a diagnostic tool for AI to detect
-# problems in the repbox pipeline for reproductions including metaregBase
-# replications. HTML reports that are easier for humans to read can be
-# generated with rrd_html_do instead.
-rrd_plain_do = function(
-  project_dir,
-  parcels = list(),
-  opts = rrd_opts(),
-  outfile = "do_report.txt",
-  split_outdir = "do_report"
-) {
-  restore.point("rrd_plain_do")
-
-  project_dir = normalizePath(project_dir, mustWork = FALSE)
-
-  outdir = file.path(project_dir, "reports")
-  if (isTRUE(opts$split_by_do)) {
-    if (basename(split_outdir) == split_outdir) {
-      split_outdir = file.path(outdir, split_outdir)
+  err_runids = integer(0)
+  md_runids = integer(0)
+  if (!is.null(parcels$stata_run_cmd) && NROW(parcels$stata_run_cmd) > 0) {
+    df = as.data.frame(parcels$stata_run_cmd)
+    err_mask = rep(FALSE, NROW(df))
+    for (field in intersect(c("errcode", "rc", "error_code", "stata_rc"), names(df))) {
+      val = suppressWarnings(as.numeric(df[[field]]))
+      err_mask = err_mask | (!is.na(val) & val != 0)
     }
-    outdir = split_outdir
-  } else {
-    if (basename(outfile) == outfile) {
-      outfile = file.path(outdir, outfile)
+    for (field in intersect(c("err_msg", "error_msg", "error", "stderr"), names(df))) {
+      val = as.character(df[[field]])
+      err_mask = err_mask | (!is.na(val) & nzchar(val))
     }
-    outdir = dirname(outfile)
+    err_runids = unique(suppressWarnings(as.integer(df$runid[err_mask])))
+    err_runids = err_runids[!is.na(err_runids)]
+
+    if ("missing_data" %in% names(df)) {
+      md_mask = rrd_as_logical(df$missing_data)
+      md_runids = unique(suppressWarnings(as.integer(df$runid[md_mask])))
+      md_runids = md_runids[!is.na(md_runids)]
+    }
   }
 
-  if (!dir.exists(outdir)) {
-    dir.create(outdir, recursive = TRUE, showWarnings = FALSE)
+  # Calculate exact run counts per command
+  runs_in_regcheck = vapply(cmd_runids, function(ids) sum(ids %in% regcheck_runids), integer(1))
+  runs_prob = vapply(cmd_runids, function(ids) sum(ids %in% prob_runids), integer(1))
+  runs_err = vapply(cmd_runids, function(ids) sum(ids %in% err_runids), integer(1))
+  runs_md = vapply(cmd_runids, function(ids) sum(ids %in% md_runids), integer(1))
+
+  # Use booleans if a command didn't output a runid but has an error flag (e.g. compile error)
+  has_cmd_err = vapply(seq_len(NROW(cmd_df)), function(i) rrd_cmd_has_error(cmd_df[i,,drop=FALSE]), logical(1))
+  
+  has_cmd_md = rep(FALSE, NROW(cmd_df))
+  if ("missing_data" %in% names(cmd_df)) has_cmd_md = has_cmd_md | rrd_as_logical(cmd_df$missing_data)
+  if ("run_missing_data" %in% names(cmd_df)) has_cmd_md = has_cmd_md | rrd_as_logical(cmd_df$run_missing_data)
+
+  for (i in seq_along(cmd_runids)) {
+    if (length(cmd_runids[[i]]) == 0) {
+       runs_err[i] = if (has_cmd_err[i]) 1L else 0L
+       runs_md[i] = if (has_cmd_md[i]) 1L else 0L
+    }
   }
 
-  parcels = rrd_load_report_parcels(project_dir, parcels = parcels)
-  do_df = rrd_get_do_files(project_dir, parcels = parcels)
-  cmd_df = rrd_get_cmd_df(project_dir, parcels = parcels)
-  cmd_df = rrd_add_regcheck_reg_flags(cmd_df, parcels = parcels)
+  reg_with_prob = sum(is_reg * runs_prob)
+  
+  runs_correct = vapply(cmd_runids, function(ids) {
+      sum((ids %in% regcheck_runids) & !(ids %in% prob_runids) & !(ids %in% err_runids) & !(ids %in% md_runids))
+  }, integer(1))
+  correct_checked_reg = sum(is_reg * runs_correct)
 
-  if (NROW(cmd_df) > 0) {
-    cmd_df$rrd_has_run_output = rrd_cmd_has_run_output(cmd_df, parcels, opts = opts)
-    cmd_df$rrd_has_problem_reg = rrd_has_problem_reg(cmd_df, parcels = parcels)
-  } else {
-    cmd_df$rrd_has_run_output = logical(0)
-    cmd_df$rrd_has_problem_reg = logical(0)
-  }
+  runs_err_no_md = vapply(seq_along(cmd_runids), function(i) {
+      ids = cmd_runids[[i]]
+      if (length(ids) == 0) return(runs_err[i] * (1L - runs_md[i]))
+      sum((ids %in% err_runids) & !(ids %in% md_runids))
+  }, integer(1))
 
-  if (NROW(do_df) == 0) {
-    txt = paste0(
-      "# repboxReportDo plain do report\n\n",
-      "Project dir: ", project_dir, "\n\n",
-      "No Stata do files were found.\n"
-    )
-    if (!isTRUE(opts$split_by_do)) writeLines(txt, outfile, useBytes = TRUE)
-    return(invisible(if (isTRUE(opts$split_by_do)) character() else outfile))
-  }
+  runs_reg_no_regcheck_no_err_no_md = vapply(seq_along(cmd_runids), function(i) {
+      ids = cmd_runids[[i]]
+      if (length(ids) == 0) {
+         if (!has_cmd_err[i] && !has_cmd_md[i]) return(1L) else return(0L)
+      }
+      sum(!(ids %in% regcheck_runids) & !(ids %in% err_runids) & !(ids %in% md_runids))
+  }, integer(1))
 
-  keep = rep(TRUE, NROW(do_df))
+  reg_in_regcheck_with_error = vapply(seq_along(cmd_runids), function(i) {
+      ids = cmd_runids[[i]]
+      sum((ids %in% regcheck_runids) & (ids %in% err_runids))
+  }, integer(1))
 
-  if (isTRUE(opts$only_do_with_reg)) {
-    keep = keep & rrd_do_has_cmd_flag(do_df$file_path, cmd_df, "is_reg")
-  }
-
-  if (isTRUE(opts$only_do_with_prob_reg)) {
-    keep = keep & rrd_do_has_cmd_flag(do_df$file_path, cmd_df, "rrd_has_problem_reg")
-  }
-
-  do_df = do_df[keep, , drop = FALSE]
-
-  header = rrd_report_header(
-    project_dir = project_dir,
-    opts = opts,
-    num_do_files = NROW(do_df),
-    num_cmds = NROW(cmd_df),
-    parcels = parcels
+  items = c(
+    "Included command runs",
+    "Regression runs",
+    "Correct checked regression runs",
+    "Regression runs with regcheck issues",
+    "Regression runs with missing data",
+    "Regression runs with errors, no missing data",
+    "Regression runs without regcheck row, no recorded error or missing data"
   )
 
-  if (isTRUE(opts$split_by_do)) {
-    files = character(NROW(do_df))
-
-    for (i in seq_len(NROW(do_df))) {
-      file_cmd_df = rrd_cmds_for_file(cmd_df, do_df$file_path[i])
-      txt = paste0(
-        header,
-        "\n",
-        rrd_render_do_file(do_df[i, , drop = FALSE], file_cmd_df, parcels, opts)
-      )
-
-      out_file = file.path(
-        outdir,
-        paste0(sprintf("%03d_", i), rrd_safe_file_name(do_df$file_path[i]), ".txt")
-      )
-      writeLines(txt, out_file, useBytes = TRUE)
-      files[i] = out_file
-    }
-
-    return(invisible(files))
-  }
-
-  parts = lapply(seq_len(NROW(do_df)), function(i) {
-    file_cmd_df = rrd_cmds_for_file(cmd_df, do_df$file_path[i])
-    rrd_render_do_file(do_df[i, , drop = FALSE], file_cmd_df, parcels, opts)
-  })
-
-  txt = paste0(c(header, unlist(parts)), collapse = "\n")
-  writeLines(txt, outfile, useBytes = TRUE)
-
-  invisible(outfile)
-}
-```
-
-!END_MODIFICATION rrd_plain_do in rrd_plain.R
-
-!MODIFICATION rrd_html_do in rrd_html.R
-scope = "function"
-file = "/home/rstudio/repbox/repboxReportDo/R/rrd_html.R"
-function_name = "rrd_html_do"
-description = "Mark regcheck and reg parcel commands as regressions before filtering do files and building HTML issues."
-------------------------------------------------------------------------------------------------------------------------
-
-```r
-#' Create a human-friendly HTML report for Stata reproduction diagnostics
-#'
-#' @param project_dir Repbox project directory.
-#' @param parcels Optional preloaded parcel list.
-#' @param opts Options, typically from rrd_opts().
-#' @param output_dir Output directory. Defaults to project_dir/reports.
-#' @param output_file Output HTML file name.
-#' @param copy_assets Shall CSS and JS assets from inst/www be copied?
-#' @return Invisibly returns the generated HTML file path.
-#' @export
-rrd_html_do = function(
-  project_dir,
-  parcels = list(),
-  opts = rrd_opts(),
-  output_dir = file.path(project_dir, "reports"),
-  output_file = "do_report.html",
-  copy_assets = TRUE
-) {
-  restore.point("rrd_html_do")
-
-  if (!requireNamespace("htmltools", quietly = TRUE)) {
-    stop("Package 'htmltools' is needed for rrd_html_do().", call. = FALSE)
-  }
-
-  project_dir = normalizePath(project_dir, mustWork = FALSE)
-
-  if (!dir.exists(output_dir)) {
-    dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
-  }
-
-  if (isTRUE(copy_assets)) {
-    rrd_copy_html_assets(output_dir)
-  }
-
-  parcels = rrd_load_report_parcels(project_dir, parcels = parcels)
-  do_df = rrd_get_do_files(project_dir, parcels = parcels)
-  cmd_df = rrd_get_cmd_df(project_dir, parcels = parcels)
-  cmd_df = rrd_add_regcheck_reg_flags(cmd_df, parcels = parcels)
-
-  if (NROW(cmd_df) > 0) {
-    cmd_df$rrd_has_run_output = rrd_cmd_has_run_output(cmd_df, parcels, opts = opts)
-    cmd_df$rrd_has_problem_reg = rrd_has_problem_reg(cmd_df, parcels = parcels)
-  } else {
-    cmd_df$rrd_has_run_output = logical(0)
-    cmd_df$rrd_has_problem_reg = logical(0)
-  }
-
-  if (NROW(do_df) > 0) {
-    keep = rep(TRUE, NROW(do_df))
-
-    if (isTRUE(opts$only_do_with_reg)) {
-      keep = keep & rrd_do_has_cmd_flag(do_df$file_path, cmd_df, "is_reg")
-    }
-
-    if (isTRUE(opts$only_do_with_prob_reg)) {
-      keep = keep & rrd_do_has_cmd_flag(do_df$file_path, cmd_df, "rrd_has_problem_reg")
-    }
-
-    do_df = do_df[keep, , drop = FALSE]
-  }
-
-  do_df$rrd_file_idx = seq_len(NROW(do_df))
-
-  if (NROW(cmd_df) > 0 && NROW(do_df) > 0) {
-    cmd_df$rrd_file_idx = vapply(cmd_df$file_path, function(file_path) {
-      ind = which(rrd_same_file(do_df$file_path, file_path))
-      if (length(ind) == 0) return(NA_integer_)
-      do_df$rrd_file_idx[ind[[1]]]
-    }, integer(1))
-
-    cmd_df = cmd_df[!is.na(cmd_df$rrd_file_idx), , drop = FALSE]
-    cmd_df$rrd_cmd_idx = seq_len(NROW(cmd_df))
-    cmd_df$rrd_cmd_id = paste0("rrd-cmd-", cmd_df$rrd_file_idx, "-", cmd_df$rrd_cmd_idx)
-  } else {
-    cmd_df$rrd_file_idx = integer(0)
-    cmd_df$rrd_cmd_idx = integer(0)
-    cmd_df$rrd_cmd_id = character(0)
-  }
-
-  issue_df = rrd_html_issue_df(cmd_df, parcels = parcels, opts = opts)
-  summary_df = rrd_html_summary_df(cmd_df, issue_df = issue_df, parcels = parcels, opts = opts)
-  problem_df = rrd_html_problem_df(project_dir = project_dir, parcels = parcels)
-
-  html_content = htmltools::tagList(
-    htmltools::tags$html(
-      htmltools::tags$head(
-        htmltools::tags$meta(charset = "UTF-8"),
-        htmltools::tags$meta(`http-equiv` = "X-UA-Compatible", content = "IE=edge"),
-        htmltools::tags$meta(name = "viewport", content = "width=device-width, initial-scale=1"),
-        htmltools::tags$title(paste0("repboxReportDo: ", basename(project_dir))),
-        htmltools::tags$link(href = "shared/rrd_html.css", rel = "stylesheet")
-      ),
-      htmltools::tags$body(
-        htmltools::tags$div(
-          class = "rrd-page",
-          htmltools::tags$div(
-            class = "rrd-main",
-            htmltools::tags$div(
-              id = "rrd-code-col",
-              class = "rrd-code-col",
-              rrd_html_do_panel(do_df, cmd_df, parcels = parcels, opts = opts)
-            ),
-            htmltools::tags$div(
-              id = "rrd-report-col",
-              class = "rrd-report-col",
-              rrd_html_report_panel(
-                issue_df,
-                summary_df = summary_df,
-                problem_df = problem_df
-              )
-            )
-          )
-        ),
-        htmltools::tags$script(src = "shared/rrd_html.js")
-      )
-    )
+  values = c(
+    sum(n_runs),
+    sum(n_runs[is_reg]),
+    correct_checked_reg,
+    reg_with_prob,
+    sum(runs_md[is_reg]),
+    sum(runs_err_no_md[is_reg]),
+    sum(runs_reg_no_regcheck_no_err_no_md[is_reg])
   )
 
-  report_path = file.path(output_dir, output_file)
-  htmltools::save_html(html_content, file = report_path)
+  if (sum(reg_in_regcheck_with_error[is_reg]) > 0) {
+    items = c(items, "Regression runs in regcheck with errors")
+    values = c(values, sum(reg_in_regcheck_with_error[is_reg]))
+  }
 
-  invisible(report_path)
+  items = c(
+    items,
+    "Non-regression command runs with missing data",
+    "Non-regression command runs with errors, no missing data",
+    "Issues shown in issue tab"
+  )
+
+  values = c(
+    values,
+    sum(runs_md[!is_reg]),
+    sum(runs_err_no_md[!is_reg]),
+    if (is.null(issue_df)) 0L else NROW(issue_df)
+  )
+
+  if (!is.null(issue_df) && NROW(issue_df) > 0 && "issue_type" %in% names(issue_df) && "issue_title" %in% names(issue_df)) {
+    reg_titles = issue_df$issue_title[issue_df$issue_type == "regcheck"]
+    reg_titles = as.character(reg_titles)
+    reg_titles = reg_titles[!is.na(reg_titles) & nzchar(reg_titles)]
+
+    if (length(reg_titles) > 0) {
+      base_titles = stringi::stri_replace_all_regex(reg_titles, "\\s+\\(\\d+\\s+runs\\)$", "")
+
+      run_counts = vapply(issue_df$runids[issue_df$issue_type == "regcheck"], function(run_str) {
+        if (stringi::stri_detect_regex(run_str, "\\(\\d+\\)$")) {
+           as.integer(stringi::stri_extract_last_regex(run_str, "\\d+"))
+        } else if (nzchar(run_str)) {
+           length(stringi::stri_split_fixed(run_str, ",", omit_empty = TRUE)[[1]])
+        } else {
+           0L
+        }
+      }, integer(1))
+
+      agg_counts = tapply(run_counts, base_titles, sum)
+      agg_counts = sort(agg_counts, decreasing = TRUE)
+      
+      items = c(items, paste0("Regcheck issue (runs): ", names(agg_counts)))
+      values = c(values, as.integer(agg_counts))
+    }
+  }
+
+  data.frame(
+    item = items,
+    value = values,
+    stringsAsFactors = FALSE
+  )
 }
 ```
-
-!END_MODIFICATION rrd_html_do in rrd_html.R
+!END_MODIFICATION rrd_html_summary_df rrd_html.R

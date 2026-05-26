@@ -20,6 +20,8 @@ example = function() {
 #' @param df_long_nchar Minimum number of characters after which one-row string variables are printed as long variables
 #' @param df_long_max_chars Optional maximum string length for all long variables. By default, no shortening is applied.
 #' @param df_long_max_chars_by_var Optional named numeric vector or list with variable-specific maximum string lengths for long variables.
+#' @param max_runs_shown Max number of runs (e.g. from a loop) to show output for per command.
+#' @param max_regcheck_runs_shown Max number of runs (e.g. from a loop) to show regcheck details for per command.
 rrd_opts = function(
   show_regcheck = TRUE,
   show_all_err = TRUE,
@@ -33,7 +35,9 @@ rrd_opts = function(
   df_exclude_vars = character(0),
   df_long_nchar = 10,
   df_long_max_chars = NULL,
-  df_long_max_chars_by_var = NULL
+  df_long_max_chars_by_var = NULL,
+  max_runs_shown = 5,
+  max_regcheck_runs_shown = 5
 ) {
   as.list(environment())
 }
@@ -408,9 +412,18 @@ rrd_attach_run_cmd_info = function(cmd_df, parcels = list()) {
   run_cmd = as.data.frame(run_cmd)
   run_cmd = rrd_normalize_stata_run_cmd(run_cmd)
 
-  match_pos = rrd_match_run_cmd_pos(cmd_df, run_cmd)
+  cmd_file_norm = rrd_norm_path(cmd_df$file_path)
+  cmd_key_file_line = paste0(cmd_file_norm, "\r", cmd_df$line)
 
-  cmd_df$rrd_run_match = !is.na(match_pos)
+  match_list = lapply(seq_len(NROW(cmd_df)), function(i) {
+    idx = which(run_cmd$rrd_key_file_line == cmd_key_file_line[i])
+    if (length(idx) == 0) {
+       idx = which(run_cmd$rrd_key_line == as.character(cmd_df$line[i]))
+    }
+    idx
+  })
+
+  cmd_df$rrd_run_match = lengths(match_list) > 0
 
   run_cols = setdiff(
     names(run_cmd),
@@ -418,16 +431,29 @@ rrd_attach_run_cmd_info = function(cmd_df, parcels = list()) {
   )
 
   for (col in run_cols) {
-    vals = rep(NA, NROW(cmd_df))
-    matched = !is.na(match_pos)
-    vals[matched] = run_cmd[[col]][match_pos[matched]]
+    vals = lapply(match_list, function(idx) {
+       if (length(idx) == 0) return(NA)
+       run_cmd[[col]][idx]
+    })
+
+    first_vals = sapply(vals, function(x) x[[1]])
 
     if (col == "runid") {
-      cmd_df$runid = ifelse(is.na(cmd_df$runid), suppressWarnings(as.integer(vals)), cmd_df$runid)
+      cmd_df$runid = ifelse(is.na(cmd_df$runid), suppressWarnings(as.integer(first_vals)), cmd_df$runid)
+      cmd_df$all_runids = lapply(vals, function(x) {
+         res = suppressWarnings(as.integer(x))
+         res[!is.na(res)]
+      })
     } else if (col %in% names(cmd_df)) {
-      cmd_df[[paste0("run_", col)]] = vals
+      cmd_df[[paste0("run_", col)]] = first_vals
     } else {
-      cmd_df[[col]] = vals
+      cmd_df[[col]] = first_vals
+    }
+
+    if (col %in% c("errcode", "rc", "error_code", "stata_rc")) {
+       cmd_df[[paste0("any_", col)]] = sapply(vals, function(x) {
+          any(suppressWarnings(as.numeric(x)) != 0, na.rm = TRUE)
+       })
     }
   }
 
@@ -675,6 +701,10 @@ rrd_cmd_runids = function(cmd, parcels = list()) {
 
   ids = integer(0)
 
+  if ("all_runids" %in% names(cmd) && is.list(cmd$all_runids)) {
+    ids = c(ids, cmd$all_runids[[1]])
+  }
+
   if ("runid" %in% names(cmd)) {
     ids = c(ids, suppressWarnings(as.integer(cmd$runid)))
   }
@@ -717,6 +747,7 @@ rrd_cmd_inline_output_text = function(cmd) {
   text_cols = intersect(
     c(
       "log",
+      "logtxt",
       "log_text",
       "cmd_log",
       "output",
@@ -730,6 +761,7 @@ rrd_cmd_inline_output_text = function(cmd) {
       "err_msg",
       "error_msg",
       "run_log",
+      "run_logtxt",
       "run_log_text",
       "run_cmd_log",
       "run_output",
@@ -777,15 +809,23 @@ rrd_stata_run_log_text = function(runids, parcels = list(), opts = rrd_opts()) {
   }
 
   log_runid = suppressWarnings(as.integer(run_log$runid))
-  rows = log_runid %in% runids
-  rows[is.na(rows)] = FALSE
-  if (!any(rows)) return("")
+  rows = which(log_runid %in% runids)
+  if (length(rows) == 0) return("")
+
+  max_runs = opts$max_runs_shown
+  if (is.null(max_runs)) max_runs = 5
+
+  n_runs = length(rows)
+  if (n_runs > max_runs) {
+     rows = rows[seq_len(max_runs)]
+  }
 
   run_log = run_log[rows, , drop = FALSE]
 
   text_cols = intersect(
     c(
       "log",
+      "logtxt",
       "log_text",
       "cmd_log",
       "output",
@@ -804,11 +844,23 @@ rrd_stata_run_log_text = function(runids, parcels = list(), opts = rrd_opts()) {
 
   pieces = character(0)
 
+  if (n_runs > 1) {
+     pieces = c(pieces, paste0("[Showing logs for ", length(rows), " of ", n_runs, " runs in this loop]"))
+  }
+
   for (col in text_cols) {
-    vals = rrd_chr_vec(run_log[[col]])
+    vals = sapply(seq_len(NROW(run_log)), function(i) {
+       v = rrd_chr_vec(run_log[[col]][i])
+       v = v[nzchar(v)]
+       if (length(v) > 0) {
+          if (n_runs > 1) paste0("--- runid ", run_log$runid[i], " ---\n", paste0(v, collapse = "\n"))
+          else paste0(v, collapse = "\n")
+       } else ""
+    })
     vals = vals[nzchar(vals)]
+
     if (length(vals) > 0) {
-      pieces = c(pieces, paste0("stata_run_log.", col, ":\n", paste0(vals, collapse = "\n")))
+      pieces = c(pieces, paste0("stata_run_log.", col, ":\n", paste0(vals, collapse = "\n\n")))
     }
   }
 
@@ -817,7 +869,7 @@ rrd_stata_run_log_text = function(runids, parcels = list(), opts = rrd_opts()) {
     pieces = c(pieces, file_pieces)
   }
 
-  if (length(pieces) == 0) {
+  if (length(pieces) == (if (n_runs > 1) 1 else 0)) {
     pieces = c(pieces, rrd_df_to_text(run_log, opts = opts))
   }
 
@@ -897,6 +949,14 @@ rrd_regcheck_text = function(runids, parcels = list(), opts = rrd_opts()) {
   df = df[has_problem, , drop = FALSE]
   if (NROW(df) == 0) return("")
 
+  max_runs = opts$max_regcheck_runs_shown
+  if (is.null(max_runs)) max_runs = 5
+
+  n_runs = NROW(df)
+  if (n_runs > max_runs) {
+     df = df[seq_len(max_runs), , drop = FALSE]
+  }
+
   keep_cols = intersect(
     c(
       "runid",
@@ -924,7 +984,11 @@ rrd_regcheck_text = function(runids, parcels = list(), opts = rrd_opts()) {
     df = df[, keep_cols, drop = FALSE]
   }
 
-  rrd_df_to_text(df, opts = opts)
+  txt = rrd_df_to_text(df, opts = opts)
+  if (n_runs > max_runs) {
+     txt = paste0(txt, "\n... and ", n_runs - max_runs, " more runs with issues.")
+  }
+  txt
 }
 
 
@@ -933,8 +997,13 @@ rrd_cmd_has_error = function(cmd) {
 
   err_fields = intersect(c("errcode", "rc", "error_code", "stata_rc", "run_errcode", "run_rc"), names(cmd))
   for (field in err_fields) {
-    val = suppressWarnings(as.numeric(cmd[[field]][1]))
-    if (!is.na(val) && val != 0) return(TRUE)
+    any_field = paste0("any_", field)
+    if (any_field %in% names(cmd)) {
+       if (isTRUE(cmd[[any_field]][1])) return(TRUE)
+    } else {
+       val = suppressWarnings(as.numeric(cmd[[field]][1]))
+       if (!is.na(val) && val != 0) return(TRUE)
+    }
   }
 
   msg_fields = intersect(c("err_msg", "error_msg", "error", "stderr", "run_err_msg", "run_error_msg"), names(cmd))
@@ -944,6 +1013,31 @@ rrd_cmd_has_error = function(cmd) {
   }
 
   FALSE
+}
+rrd_cmd_error_runids = function(cmd, parcels = list()) {
+  restore.point("rrd_cmd_error_runids")
+
+  runids = rrd_cmd_runids(cmd, parcels = parcels)
+  if (length(runids) == 0) return(integer(0))
+
+  run_cmd = parcels$stata_run_cmd
+  if (is.null(run_cmd) || NROW(run_cmd) == 0) return(integer(0))
+
+  df = as.data.frame(run_cmd)
+  df = df[df$runid %in% runids, , drop = FALSE]
+  if (NROW(df) == 0) return(integer(0))
+
+  err_mask = rep(FALSE, NROW(df))
+  for (field in intersect(c("errcode", "rc", "error_code", "stata_rc"), names(df))) {
+    val = suppressWarnings(as.numeric(df[[field]]))
+    err_mask = err_mask | (!is.na(val) & val != 0)
+  }
+  for (field in intersect(c("err_msg", "error_msg", "error", "stderr"), names(df))) {
+    val = as.character(df[[field]])
+    err_mask = err_mask | (!is.na(val) & nzchar(val))
+  }
+
+  unique(suppressWarnings(as.integer(df$runid[err_mask])))
 }
 
 
@@ -978,7 +1072,19 @@ rrd_cmd_error_text = function(cmd) {
   }, character(1))
 
   vals = vals[nzchar(vals)]
-  paste0(vals, collapse = "\n")
+
+  # Append a note if there are multiple runs with errors
+  has_any_err = FALSE
+  for (field in intersect(c("errcode", "rc", "error_code", "stata_rc"), names(cmd))) {
+     if (isTRUE(cmd[[paste0("any_", field)]][1])) has_any_err = TRUE
+  }
+
+  res = paste0(vals, collapse = "\n")
+  if (has_any_err && !nzchar(res)) {
+      res = "An error occurred in one or more runs of this command in a loop."
+  }
+
+  res
 }
 
 

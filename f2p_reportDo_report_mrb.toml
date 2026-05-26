@@ -20,11 +20,6 @@ Below is code from selected R projects from my repbox / metareg toolbox.
 
 {{repboxReport}}
 
-# Package metaregBase
-
-{{metaregBase}}
-
-
 
 
 
@@ -214,6 +209,7 @@ include_files = '''
 include_files = '''
 /home/rstudio/repbox/repboxReportDo/DESCRIPTION
 /home/rstudio/repbox/repboxReportDo/R/*.R
+/home/rstudio/repbox/repboxReportDo/inst/www/*.*
 '''
 
 [[repboxReport]]

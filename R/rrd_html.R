@@ -190,7 +190,7 @@ rrd_html_do_panel = function(do_df, cmd_df, parcels, opts) {
       `data-tab-target` = paste0("rrd-do-tab-", file_idx),
       `data-file-idx` = file_idx,
       title = do_df$file_path[i],
-      htmltools::htmlEscape(file_label)
+      file_label
     )
   })
 
@@ -256,7 +256,7 @@ rrd_html_do_file_pane = function(do_row, cmd_df, parcels, opts, active = FALSE) 
         class = "rrd-code-cell",
         htmltools::tags$code(
           class = "rrd-code-text",
-          htmltools::htmlEscape(lines[[line_num]])
+          lines[[line_num]]
         ),
         if (!is.null(extra_html) && nzchar(extra_html)) {
           htmltools::HTML(extra_html)
@@ -276,7 +276,7 @@ rrd_html_do_file_pane = function(do_row, cmd_df, parcels, opts, active = FALSE) 
     htmltools::tags$div(
       class = "rrd-file-title",
       htmltools::tags$span(class = "rrd-file-badge", "File"),
-      htmltools::tags$span(class = "rrd-file-path", htmltools::htmlEscape(file_path))
+      htmltools::tags$span(class = "rrd-file-path", file_path)
     ),
     htmltools::tags$div(
       class = "rrd-code-lines",
@@ -356,10 +356,13 @@ rrd_html_output_block = function(cmd, txt) {
   restore.point("rrd_html_output_block")
 
   runids = rrd_cmd_runids(cmd)
-  runid_label = if (length(runids) == 0) {
-    "runid NA"
+
+  if (length(runids) == 0) {
+    runid_label = "runid NA"
+  } else if (length(runids) > 10) {
+    runid_label = paste0("runid ", paste0(runids[1:10], collapse = ", "), ", ... (", length(runids), " total)")
   } else {
-    paste0("runid ", paste0(runids, collapse = ", "))
+    runid_label = paste0("runid ", paste0(runids, collapse = ", "))
   }
 
   cls = c("rrd-output-block")
@@ -382,6 +385,12 @@ rrd_html_output_block = function(cmd, txt) {
   )
 }
 
+
+rrd_format_runids_for_issue = function(ids) {
+   if (length(ids) == 0) return("")
+   if (length(ids) > 10) return(paste0(paste0(ids[1:10], collapse = ", "), ", ... (", length(ids), ")"))
+   paste0(ids, collapse = ", ")
+}
 
 rrd_html_issue_df = function(cmd_df, parcels = list(), opts = rrd_opts()) {
   restore.point("rrd_html_issue_df")
@@ -417,13 +426,12 @@ rrd_html_issue_df = function(cmd_df, parcels = list(), opts = rrd_opts()) {
 
     is_reg = isTRUE(cmd$is_reg[1])
     show_error_issue = is_reg || isTRUE(opts$show_nonreg_issue_errors)
-
-    runids = rrd_cmd_runids(cmd, parcels = parcels)
-    runids_txt = if (length(runids) == 0) "" else paste0(runids, collapse = ", ")
     cmdline = if ("cmdline" %in% names(cmd)) rrd_chr_vec(cmd$cmdline[1]) else ""
 
     if (show_error_issue && rrd_cmd_has_error(cmd)) {
       err_txt = rrd_cmd_error_text(cmd)
+      err_runids = rrd_cmd_error_runids(cmd, parcels = parcels)
+      if (length(err_runids) == 0) err_runids = rrd_cmd_runids(cmd, parcels = parcels) # fallback
 
       pos = pos + 1L
       out[[pos]] = data.frame(
@@ -437,7 +445,7 @@ rrd_html_issue_df = function(cmd_df, parcels = list(), opts = rrd_opts()) {
         file_path = as.character(cmd$file_path[1]),
         line = line,
         cmd_id = as.character(cmd$rrd_cmd_id[1]),
-        runids = runids_txt,
+        runids = rrd_format_runids_for_issue(err_runids),
         cmdline = cmdline,
         details_html = rrd_html_pre_details(err_txt),
         stringsAsFactors = FALSE
@@ -445,7 +453,8 @@ rrd_html_issue_df = function(cmd_df, parcels = list(), opts = rrd_opts()) {
     }
 
     if ("rrd_has_problem_reg" %in% names(cmd) && isTRUE(cmd$rrd_has_problem_reg[1])) {
-      reg_issue = rrd_html_regcheck_issue(runids, parcels = parcels, opts = opts)
+      all_runids = rrd_cmd_runids(cmd, parcels = parcels)
+      reg_issue = rrd_html_regcheck_issue(all_runids, parcels = parcels, opts = opts)
 
       pos = pos + 1L
       out[[pos]] = data.frame(
@@ -459,7 +468,7 @@ rrd_html_issue_df = function(cmd_df, parcels = list(), opts = rrd_opts()) {
         file_path = as.character(cmd$file_path[1]),
         line = line,
         cmd_id = as.character(cmd$rrd_cmd_id[1]),
-        runids = runids_txt,
+        runids = rrd_format_runids_for_issue(reg_issue$prob_runids),
         cmdline = cmdline,
         details_html = reg_issue$details_html,
         stringsAsFactors = FALSE
@@ -523,7 +532,8 @@ rrd_html_regcheck_issue = function(runids, parcels = list(), opts = rrd_opts()) 
     summary = "Regcheck reported a problem for this regression.",
     badge = "regcheck",
     severity = 80L,
-    details_html = rrd_html_pre_details(rrd_regcheck_text(runids, parcels = parcels, opts = opts))
+    details_html = rrd_html_pre_details(rrd_regcheck_text(runids, parcels = parcels, opts = opts)),
+    prob_runids = integer(0)
   )
 
   if (length(runids) == 0) {
@@ -537,6 +547,20 @@ rrd_html_regcheck_issue = function(runids, parcels = list(), opts = rrd_opts()) 
 
   df = as.data.frame(regcheck)
   df = df[df$runid %in% runids, , drop = FALSE]
+
+  has_problem = rep(TRUE, NROW(df))
+  if ("reg_ok" %in% names(df)) {
+    has_problem = !rrd_as_logical(df$reg_ok)
+  }
+  if ("problem" %in% names(df)) {
+    has_problem = has_problem | (!is.na(df$problem) & nzchar(as.character(df$problem)))
+  }
+  if ("comment" %in% names(df)) {
+    has_problem = has_problem | (!is.na(df$comment) & nzchar(as.character(df$comment)))
+  }
+
+  df = df[has_problem, , drop = FALSE]
+
   if (NROW(df) == 0) {
     return(default)
   }
@@ -548,14 +572,22 @@ rrd_html_regcheck_issue = function(runids, parcels = list(), opts = rrd_opts()) 
   summary = rrd_html_regcheck_summary(flags, row)
   badge = rrd_html_regcheck_badge(flags)
   severity = rrd_html_regcheck_severity(flags)
-  details_html = rrd_html_regcheck_details_html(row, parcels = parcels, opts = opts)
+
+  if (NROW(df) > 1) {
+    title = paste0(title, " (", NROW(df), " runs)")
+    summary = paste0(summary, " This issue affects ", NROW(df), " runids in a loop.")
+  }
+
+  details_html = rrd_html_regcheck_details_html(df, parcels = parcels, opts = opts)
+  prob_runids = unique(suppressWarnings(as.integer(df$runid)))
 
   list(
     title = title,
     summary = summary,
     badge = badge,
     severity = severity,
-    details_html = details_html
+    details_html = details_html,
+    prob_runids = prob_runids[!is.na(prob_runids)]
   )
 }
 
@@ -601,7 +633,15 @@ rrd_html_regcheck_title = function(flags) {
   )
 
   if (length(missing) > 0) {
-    return(paste0(rrd_html_join_words(missing), " missing"))
+    title = paste0(rrd_html_join_words(missing), " missing")
+    if (!isTRUE(flags$sb)) {
+        if (isTRUE(flags$sb_raw)) {
+           title = paste0(title, " (sb_raw exists)")
+        } else {
+           title = paste0(title, " (sb and sb_raw missing)")
+        }
+    }
+    return(title)
   }
 
   coef_bad = identical(flags$rb_sb_coef_same, FALSE)
@@ -694,57 +734,74 @@ rrd_html_regcheck_severity = function(flags) {
 }
 
 
-rrd_html_regcheck_details_html = function(row, parcels = list(), opts = rrd_opts()) {
+rrd_html_regcheck_details_html = function(df, parcels = list(), opts = rrd_opts()) {
   restore.point("rrd_html_regcheck_details_html")
 
-  runid = suppressWarnings(as.integer(row$runid[1]))
-  flags = rrd_html_regcheck_flags(row)
+  if (!is.data.frame(df)) df = as.data.frame(df)
 
-  has_all_results = isTRUE(flags$so) && isTRUE(flags$sb) && isTRUE(flags$rb)
+  max_runs_shown = opts$max_regcheck_runs_shown
+  if (is.null(max_runs_shown)) max_runs_shown = 5
 
-  pair_specs = list()
+  n_runs = NROW(df)
+  df_show = df[seq_len(min(n_runs, max_runs_shown)), , drop = FALSE]
 
-  if (
-    has_all_results &&
-    (identical(flags$rb_sb_coef_same, FALSE) || identical(flags$rb_sb_se_same, FALSE))
-  ) {
-    pair_specs[[length(pair_specs) + 1]] = list(
-      label = "sb vs rb",
-      expected = "regcoef",
-      observed = "regcoef_rb",
-      expected_label = "sb",
-      observed_label = "rb"
-    )
+  parts = lapply(seq_len(NROW(df_show)), function(i) {
+      row = df_show[i, , drop = FALSE]
+      runid = suppressWarnings(as.integer(row$runid[1]))
+      flags = rrd_html_regcheck_flags(row)
+
+      has_all_results = isTRUE(flags$so) && isTRUE(flags$sb) && isTRUE(flags$rb)
+
+      pair_specs = list()
+
+      if (
+        has_all_results &&
+        (identical(flags$rb_sb_coef_same, FALSE) || identical(flags$rb_sb_se_same, FALSE))
+      ) {
+        pair_specs[[length(pair_specs) + 1]] = list(
+          label = "sb vs rb",
+          expected = "regcoef",
+          observed = "regcoef_rb",
+          expected_label = "sb",
+          observed_label = "rb"
+        )
+      }
+
+      if (
+        has_all_results &&
+        identical(flags$sb_so_same, FALSE)
+      ) {
+        pair_specs[[length(pair_specs) + 1]] = list(
+          label = "sb vs so",
+          expected = "regcoef",
+          observed = "regcoef_so",
+          expected_label = "sb",
+          observed_label = "so"
+        )
+      }
+
+      diff_html = rrd_html_coef_diff_details(
+        runid = runid,
+        parcels = parcels,
+        pair_specs = pair_specs
+      )
+
+      regcheck_txt = rrd_df_to_text(row, opts = opts)
+      regcheck_html = paste0(
+        '<div class="rrd-details-subtitle">Regcheck row (runid ', runid, ')</div>',
+        '<pre class="rrd-details-pre"><code>',
+        htmltools::htmlEscape(regcheck_txt),
+        '</code></pre>'
+      )
+
+      paste0(diff_html, regcheck_html)
+  })
+
+  res = paste0(parts, collapse = "\n<br>\n")
+  if (n_runs > max_runs_shown) {
+      res = paste0(res, "\n<br>\n<div class='rrd-details-subtitle'>... and ", n_runs - max_runs_shown, " more runs with similar issues in this loop.</div>")
   }
-
-  if (
-    has_all_results &&
-    identical(flags$sb_so_same, FALSE)
-  ) {
-    pair_specs[[length(pair_specs) + 1]] = list(
-      label = "sb vs so",
-      expected = "regcoef",
-      observed = "regcoef_so",
-      expected_label = "sb",
-      observed_label = "so"
-    )
-  }
-
-  diff_html = rrd_html_coef_diff_details(
-    runid = runid,
-    parcels = parcels,
-    pair_specs = pair_specs
-  )
-
-  regcheck_txt = rrd_df_to_text(row, opts = opts)
-  regcheck_html = paste0(
-    '<div class="rrd-details-subtitle">Regcheck row</div>',
-    '<pre class="rrd-details-pre"><code>',
-    htmltools::htmlEscape(regcheck_txt),
-    '</code></pre>'
-  )
-
-  paste0(diff_html, regcheck_html)
+  res
 }
 
 
@@ -996,15 +1053,15 @@ rrd_html_summary_df = function(cmd_df, issue_df = NULL, parcels = list(), opts =
   restore.point("rrd_html_summary_df")
 
   empty_items = c(
-    "Included commands",
-    "Regression commands",
-    "Correct checked regressions",
-    "Regressions with regcheck issues",
-    "Regressions with missing data",
-    "Regressions with errors, no missing data",
-    "Regressions without regcheck row, no recorded error or missing data",
-    "Non-regression commands with missing data",
-    "Non-regression commands with errors, no missing data",
+    "Included command runs",
+    "Regression runs",
+    "Correct checked regression runs",
+    "Regression runs with regcheck issues",
+    "Regression runs with missing data",
+    "Regression runs with errors, no missing data",
+    "Regression runs without regcheck row, no recorded error or missing data",
+    "Non-regression command runs with missing data",
+    "Non-regression command runs with errors, no missing data",
     "Issues shown in issue tab"
   )
 
@@ -1016,92 +1073,136 @@ rrd_html_summary_df = function(cmd_df, issue_df = NULL, parcels = list(), opts =
     ))
   }
 
-  get_bool_col = function(names) {
-    cols = intersect(names, names(cmd_df))
-    if (length(cols) == 0) {
-      return(rep(FALSE, NROW(cmd_df)))
-    }
-
-    Reduce(`|`, lapply(cols, function(col) rrd_as_logical(cmd_df[[col]])))
-  }
-
-  is_reg = rrd_as_logical(cmd_df$is_reg)
-  missing_data = get_bool_col(c("missing_data", "run_missing_data"))
-
-  has_error = vapply(seq_len(NROW(cmd_df)), function(i) {
-    rrd_cmd_has_error(cmd_df[i, , drop = FALSE])
-  }, logical(1))
-
-  has_problem_reg = if ("rrd_has_problem_reg" %in% names(cmd_df)) {
-    rrd_as_logical(cmd_df$rrd_has_problem_reg)
-  } else {
-    rep(FALSE, NROW(cmd_df))
-  }
-
   cmd_runids = lapply(seq_len(NROW(cmd_df)), function(i) {
     rrd_cmd_runids(cmd_df[i, , drop = FALSE], parcels = parcels)
   })
 
+  n_runs = lengths(cmd_runids)
+  n_runs[n_runs == 0] = 1L # Fallback so command is at least counted once if it didn't run
+
+  is_reg = rrd_as_logical(cmd_df$is_reg)
+
+  # Global sets to intersect
   regcheck_runids = integer(0)
+  prob_runids = integer(0)
   if (!is.null(parcels$regcheck) && NROW(parcels$regcheck) > 0 && "runid" %in% names(parcels$regcheck)) {
-    regcheck_runids = unique(suppressWarnings(as.integer(parcels$regcheck$runid)))
+    df = as.data.frame(parcels$regcheck)
+    regcheck_runids = unique(suppressWarnings(as.integer(df$runid)))
     regcheck_runids = regcheck_runids[!is.na(regcheck_runids)]
+
+    has_problem = rep(FALSE, NROW(df))
+    if ("reg_ok" %in% names(df)) has_problem = has_problem | !rrd_as_logical(df$reg_ok)
+    if ("problem" %in% names(df)) has_problem = has_problem | (!is.na(df$problem) & nzchar(as.character(df$problem)))
+    if ("comment" %in% names(df)) has_problem = has_problem | (!is.na(df$comment) & nzchar(as.character(df$comment)))
+    prob_runids = unique(suppressWarnings(as.integer(df$runid[has_problem])))
+    prob_runids = prob_runids[!is.na(prob_runids)]
   }
 
-  in_regcheck = vapply(cmd_runids, function(runids) {
-    any(runids %in% regcheck_runids)
-  }, logical(1))
+  err_runids = integer(0)
+  md_runids = integer(0)
+  if (!is.null(parcels$stata_run_cmd) && NROW(parcels$stata_run_cmd) > 0) {
+    df = as.data.frame(parcels$stata_run_cmd)
+    err_mask = rep(FALSE, NROW(df))
+    for (field in intersect(c("errcode", "rc", "error_code", "stata_rc"), names(df))) {
+      val = suppressWarnings(as.numeric(df[[field]]))
+      err_mask = err_mask | (!is.na(val) & val != 0)
+    }
+    for (field in intersect(c("err_msg", "error_msg", "error", "stderr"), names(df))) {
+      val = as.character(df[[field]])
+      err_mask = err_mask | (!is.na(val) & nzchar(val))
+    }
+    err_runids = unique(suppressWarnings(as.integer(df$runid[err_mask])))
+    err_runids = err_runids[!is.na(err_runids)]
 
-  reg_with_missing_data = is_reg & missing_data
-  reg_with_error_no_missing = is_reg & has_error & !missing_data
-  reg_in_regcheck_with_error = is_reg & in_regcheck & has_error
-  reg_without_regcheck_no_error = is_reg & !in_regcheck & !has_error & !missing_data
+    if ("missing_data" %in% names(df)) {
+      md_mask = rrd_as_logical(df$missing_data)
+      md_runids = unique(suppressWarnings(as.integer(df$runid[md_mask])))
+      md_runids = md_runids[!is.na(md_runids)]
+    }
+  }
 
-  correct_checked_reg = is_reg &
-    in_regcheck &
-    !has_problem_reg &
-    !has_error &
-    !missing_data
+  # Calculate exact run counts per command
+  runs_in_regcheck = vapply(cmd_runids, function(ids) sum(ids %in% regcheck_runids), integer(1))
+  runs_prob = vapply(cmd_runids, function(ids) sum(ids %in% prob_runids), integer(1))
+  runs_err = vapply(cmd_runids, function(ids) sum(ids %in% err_runids), integer(1))
+  runs_md = vapply(cmd_runids, function(ids) sum(ids %in% md_runids), integer(1))
 
-  nonreg_with_missing_data = !is_reg & missing_data
-  nonreg_with_error_no_missing = !is_reg & has_error & !missing_data
+  # Use booleans if a command didn't output a runid but has an error flag (e.g. compile error)
+  has_cmd_err = vapply(seq_len(NROW(cmd_df)), function(i) rrd_cmd_has_error(cmd_df[i,,drop=FALSE]), logical(1))
+
+  has_cmd_md = rep(FALSE, NROW(cmd_df))
+  if ("missing_data" %in% names(cmd_df)) has_cmd_md = has_cmd_md | rrd_as_logical(cmd_df$missing_data)
+  if ("run_missing_data" %in% names(cmd_df)) has_cmd_md = has_cmd_md | rrd_as_logical(cmd_df$run_missing_data)
+
+  for (i in seq_along(cmd_runids)) {
+    if (length(cmd_runids[[i]]) == 0) {
+       runs_err[i] = if (has_cmd_err[i]) 1L else 0L
+       runs_md[i] = if (has_cmd_md[i]) 1L else 0L
+    }
+  }
+
+  reg_with_prob = sum(is_reg * runs_prob)
+
+  runs_correct = vapply(cmd_runids, function(ids) {
+      sum((ids %in% regcheck_runids) & !(ids %in% prob_runids) & !(ids %in% err_runids) & !(ids %in% md_runids))
+  }, integer(1))
+  correct_checked_reg = sum(is_reg * runs_correct)
+
+  runs_err_no_md = vapply(seq_along(cmd_runids), function(i) {
+      ids = cmd_runids[[i]]
+      if (length(ids) == 0) return(runs_err[i] * (1L - runs_md[i]))
+      sum((ids %in% err_runids) & !(ids %in% md_runids))
+  }, integer(1))
+
+  runs_reg_no_regcheck_no_err_no_md = vapply(seq_along(cmd_runids), function(i) {
+      ids = cmd_runids[[i]]
+      if (length(ids) == 0) {
+         if (!has_cmd_err[i] && !has_cmd_md[i]) return(1L) else return(0L)
+      }
+      sum(!(ids %in% regcheck_runids) & !(ids %in% err_runids) & !(ids %in% md_runids))
+  }, integer(1))
+
+  reg_in_regcheck_with_error = vapply(seq_along(cmd_runids), function(i) {
+      ids = cmd_runids[[i]]
+      sum((ids %in% regcheck_runids) & (ids %in% err_runids))
+  }, integer(1))
 
   items = c(
-    "Included commands",
-    "Regression commands",
-    "Correct checked regressions",
-    "Regressions with regcheck issues",
-    "Regressions with missing data",
-    "Regressions with errors, no missing data",
-    "Regressions without regcheck row, no recorded error or missing data"
+    "Included command runs",
+    "Regression runs",
+    "Correct checked regression runs",
+    "Regression runs with regcheck issues",
+    "Regression runs with missing data",
+    "Regression runs with errors, no missing data",
+    "Regression runs without regcheck row, no recorded error or missing data"
   )
 
   values = c(
-    NROW(cmd_df),
-    sum(is_reg),
-    sum(correct_checked_reg),
-    sum(is_reg & has_problem_reg),
-    sum(reg_with_missing_data),
-    sum(reg_with_error_no_missing),
-    sum(reg_without_regcheck_no_error)
+    sum(n_runs),
+    sum(n_runs[is_reg]),
+    correct_checked_reg,
+    reg_with_prob,
+    sum(runs_md[is_reg]),
+    sum(runs_err_no_md[is_reg]),
+    sum(runs_reg_no_regcheck_no_err_no_md[is_reg])
   )
 
-  if (sum(reg_in_regcheck_with_error) > 0) {
-    items = c(items, "Regressions in regcheck with errors")
-    values = c(values, sum(reg_in_regcheck_with_error))
+  if (sum(reg_in_regcheck_with_error[is_reg]) > 0) {
+    items = c(items, "Regression runs in regcheck with errors")
+    values = c(values, sum(reg_in_regcheck_with_error[is_reg]))
   }
 
   items = c(
     items,
-    "Non-regression commands with missing data",
-    "Non-regression commands with errors, no missing data",
+    "Non-regression command runs with missing data",
+    "Non-regression command runs with errors, no missing data",
     "Issues shown in issue tab"
   )
 
   values = c(
     values,
-    sum(nonreg_with_missing_data),
-    sum(nonreg_with_error_no_missing),
+    sum(runs_md[!is_reg]),
+    sum(runs_err_no_md[!is_reg]),
     if (is.null(issue_df)) 0L else NROW(issue_df)
   )
 
@@ -1111,9 +1212,23 @@ rrd_html_summary_df = function(cmd_df, issue_df = NULL, parcels = list(), opts =
     reg_titles = reg_titles[!is.na(reg_titles) & nzchar(reg_titles)]
 
     if (length(reg_titles) > 0) {
-      reg_counts = sort(table(reg_titles), decreasing = TRUE)
-      items = c(items, paste0("Regcheck issue: ", names(reg_counts)))
-      values = c(values, as.integer(reg_counts))
+      base_titles = stringi::stri_replace_all_regex(reg_titles, "\\s+\\(\\d+\\s+runs\\)$", "")
+
+      run_counts = vapply(issue_df$runids[issue_df$issue_type == "regcheck"], function(run_str) {
+        if (stringi::stri_detect_regex(run_str, "\\(\\d+\\)$")) {
+           as.integer(stringi::stri_extract_last_regex(run_str, "\\d+"))
+        } else if (nzchar(run_str)) {
+           length(stringi::stri_split_fixed(run_str, ",", omit_empty = TRUE)[[1]])
+        } else {
+           0L
+        }
+      }, integer(1))
+
+      agg_counts = tapply(run_counts, base_titles, sum)
+      agg_counts = sort(agg_counts, decreasing = TRUE)
+
+      items = c(items, paste0("Regcheck issue (runs): ", names(agg_counts)))
+      values = c(values, as.integer(agg_counts))
     }
   }
 
@@ -1138,8 +1253,8 @@ rrd_html_summary_panel = function(summary_df) {
 
   rows = lapply(seq_len(NROW(summary_df)), function(i) {
     htmltools::tags$tr(
-      htmltools::tags$td(htmltools::htmlEscape(summary_df$item[i])),
-      htmltools::tags$td(class = "rrd-summary-value", htmltools::htmlEscape(summary_df$value[i]))
+      htmltools::tags$td(summary_df$item[i]),
+      htmltools::tags$td(class = "rrd-summary-value", summary_df$value[i])
     )
   })
 
@@ -1404,15 +1519,15 @@ rrd_html_problem_panel = function(problem_df) {
   counts = sort(table(problem_df$problem_type), decreasing = TRUE)
   count_rows = lapply(seq_along(counts), function(i) {
     htmltools::tags$tr(
-      htmltools::tags$td(htmltools::htmlEscape(names(counts)[i])),
-      htmltools::tags$td(class = "rrd-summary-value", htmltools::htmlEscape(as.integer(counts[[i]])))
+      htmltools::tags$td(names(counts)[i]),
+      htmltools::tags$td(class = "rrd-summary-value", as.integer(counts[[i]]))
     )
   })
 
   detail_rows = lapply(seq_len(NROW(problem_df)), function(i) {
     htmltools::tags$tr(
-      htmltools::tags$td(htmltools::htmlEscape(problem_df$problem_type[i])),
-      htmltools::tags$td(htmltools::htmlEscape(problem_df$problem_descr[i]))
+      htmltools::tags$td(problem_df$problem_type[i]),
+      htmltools::tags$td(problem_df$problem_descr[i])
     )
   })
 
@@ -1488,7 +1603,7 @@ rrd_html_issue_panel = function(issue_df) {
         ),
         htmltools::tags$pre(
           class = "rrd-issue-cmd",
-          htmltools::htmlEscape(row$cmdline[1])
+          row$cmdline[1]
         ),
         if (nzchar(details_html)) {
           htmltools::tags$details(
@@ -1606,7 +1721,7 @@ rrd_html_render_do_file = function(do_row, cmd_df, parcels, opts, file_idx = 1L)
       ),
       htmltools::tags$pre(
         class = "rrd-do-pre",
-        htmltools::tags$code(htmltools::htmlEscape(lines[i]))
+        htmltools::tags$code(lines[i])
       )
     )
 
@@ -1629,7 +1744,7 @@ rrd_html_render_do_file = function(do_row, cmd_df, parcels, opts, file_idx = 1L)
           ),
           htmltools::tags$pre(
             class = "rrd-output-pre",
-            htmltools::tags$code(htmltools::htmlEscape(output_by_line[[key]]))
+            htmltools::tags$code(output_by_line[[key]])
           )
         )
       )
@@ -1645,7 +1760,7 @@ rrd_html_render_do_file = function(do_row, cmd_df, parcels, opts, file_idx = 1L)
     htmltools::tags$div(
       class = "rrd-file-title",
       htmltools::tags$span(class = "rrd-file-badge", "File"),
-      htmltools::tags$span(class = "rrd-file-path", htmltools::htmlEscape(file_path))
+      htmltools::tags$span(class = "rrd-file-path", file_path)
     ),
     htmltools::tags$div(class = "rrd-code-lines", line_nodes)
   )
@@ -1674,7 +1789,7 @@ rrd_html_do_panel_html = function(do_df, cmd_df, parcels, opts) {
       class = paste0("rrd-do-tab-btn", if (i == 1) " active" else ""),
       `data-tab-target` = paste0("rrd-do-tab-", i),
       `data-file-idx` = i,
-      htmltools::htmlEscape(file_label)
+      file_label
     )
   })
 

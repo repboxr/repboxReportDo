@@ -3834,8 +3834,5 @@ Important: Try to always use absolute file paths in the file argument of the mod
 # Your Task
 ##################################
 
-
 If I understand correctly report restricts attention to do files that have a regression in the reg parcel and also restricts issues to those in such do files. Yet, you should also include all regressions that are in regcheck. It will contain regressions for which rb was not run. You can ignore regressions that did not run, because of missing data (if you know where that info is stored.)
-
-
 
