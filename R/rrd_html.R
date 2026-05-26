@@ -608,6 +608,20 @@ rrd_html_regcheck_flags = function(row) {
     if (is.na(val)) "" else val
   }
 
+  get_num = function(name, default = NA_real_) {
+    if (!name %in% names(row)) return(default)
+    val = suppressWarnings(as.numeric(row[[name]][1]))
+    if (is.na(val)) return(default)
+    val
+  }
+
+  get_int = function(name, default = NA_integer_) {
+    if (!name %in% names(row)) return(default)
+    val = suppressWarnings(as.integer(row[[name]][1]))
+    if (is.na(val)) return(default)
+    val
+  }
+
   list(
     so = get_bool("so_did_run"),
     sb = get_bool("sb_did_run"),
@@ -617,6 +631,8 @@ rrd_html_regcheck_flags = function(row) {
     sb_so_same = get_bool("sb_so_identical", default = NA),
     rb_sb_coef_same = get_bool("rb_sb_coef_same", default = NA),
     rb_sb_se_same = get_bool("rb_sb_se_same", default = NA),
+    rb_sb_share_coeff_same = get_num("rb_sb_share_coeff_same"),
+    sb_num_coef = get_int("sb_num_coef"),
     problem = get_chr("problem"),
     comment = get_chr("comment")
   )
@@ -647,7 +663,31 @@ rrd_html_regcheck_title = function(flags) {
   coef_bad = identical(flags$rb_sb_coef_same, FALSE)
   se_bad = identical(flags$rb_sb_se_same, FALSE)
 
-  if (coef_bad && se_bad) return("sb vs rb coef/se mismatch")
+  if (coef_bad && se_bad) {
+    title = "sb vs rb coef/se mismatch"
+
+    share_same = suppressWarnings(as.numeric(flags$rb_sb_share_coeff_same))
+    sb_num_coef = suppressWarnings(as.integer(flags$sb_num_coef))
+
+    details = character(0)
+
+    if (!is.na(share_same)) {
+      share_not_same = 100 * (1 - share_same)
+      digits = if (abs(share_not_same) < 10) 1L else 0L
+      share_not_same_txt = formatC(share_not_same, digits = digits, format = "f")
+      details = c(details, paste0(share_not_same_txt, "% coeffs differ"))
+    }
+
+    if (!is.na(sb_num_coef)) {
+      details = c(details, paste0(sb_num_coef, " sb coefs"))
+    }
+
+    if (length(details) > 0) {
+      title = paste0(title, " (", paste0(details, collapse = ", "), ")")
+    }
+
+    return(title)
+  }
   if (coef_bad) return("sb vs rb coef mismatch")
   if (se_bad) return("sb vs rb SE mismatch")
 
