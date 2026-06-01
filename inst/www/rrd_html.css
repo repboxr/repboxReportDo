@@ -175,7 +175,7 @@ body {
 }
 
 .rrd-code-text {
-  display: block;
+  display: inline;
   margin: 0;
   padding: 0;
   white-space: pre-wrap;
@@ -188,9 +188,20 @@ body {
   -moz-tab-size: 1;
 }
 
-.rrd-reg-line .rrd-code-text {
+.rrd-reg-line .rrd-code-text,
+.rrd-reg-line-ok .rrd-code-text {
   font-weight: 700;
   color: #17602f;
+}
+
+.rrd-reg-line-issue .rrd-code-text {
+  font-weight: 700;
+  color: #d92d20;
+}
+
+.rrd-reg-line-not-run .rrd-code-text {
+  font-weight: 700;
+  color: #875bf7;
 }
 
 .rrd-error-line {
@@ -207,6 +218,13 @@ body {
 
 .rrd-problem-reg-line .rrd-line-num {
   color: #b54708;
+}
+
+.rrd-cache-icon {
+  font-size: 11.5px;
+  margin-right: 4px;
+  user-select: none;
+  display: inline-block;
 }
 
 .rrd-active-line {

@@ -50,6 +50,13 @@ rrd_opts = function(
 # problems in the repbox pipeline for reproductions including metaregBase
 # replications. HTML reports that are easier for humans to read can be
 # generated with rrd_html_do instead.
+# A plain text "report" that shows original do files combined with selected
+# output information as specified by opts.
+#
+# The plain version is mainly intended as a diagnostic tool for AI to detect
+# problems in the repbox pipeline for reproductions including metaregBase
+# replications. HTML reports that are easier for humans to read can be
+# generated with rrd_html_do instead.
 rrd_plain_do = function(
   project_dir,
   parcels = list(),
@@ -85,9 +92,24 @@ rrd_plain_do = function(
   if (NROW(cmd_df) > 0) {
     cmd_df$rrd_has_run_output = rrd_cmd_has_run_output(cmd_df, parcels, opts = opts)
     cmd_df$rrd_has_problem_reg = rrd_has_problem_reg(cmd_df, parcels = parcels)
+    cmd_df$rrd_reg_status = rrd_cmd_reg_status(cmd_df, parcels = parcels)
+
+    cache_dir = file.path(project_dir, "drf", "cached_dta")
+    cache_runids = integer(0)
+    if (dir.exists(cache_dir)) {
+      cache_files = list.files(cache_dir, pattern = "_cache\\.dta$")
+      cache_runids = suppressWarnings(as.integer(stringi::stri_replace_first_regex(cache_files, "_cache\\.dta$", "")))
+      cache_runids = cache_runids[!is.na(cache_runids)]
+    }
+    cmd_df$rrd_has_cache = vapply(seq_len(NROW(cmd_df)), function(i) {
+      runids = rrd_cmd_runids(cmd_df[i, , drop = FALSE], parcels = parcels)
+      any(runids %in% cache_runids)
+    }, logical(1))
   } else {
     cmd_df$rrd_has_run_output = logical(0)
     cmd_df$rrd_has_problem_reg = logical(0)
+    cmd_df$rrd_reg_status = character(0)
+    cmd_df$rrd_has_cache = logical(0)
   }
 
   if (NROW(do_df) == 0) {
@@ -1282,4 +1304,71 @@ rrd_safe_file_name = function(x) {
   if (!nzchar(x)) x = "do_file"
 
   x
+}
+
+
+rrd_cmd_reg_status = function(cmd_df, parcels = list()) {
+  restore.point("rrd_cmd_reg_status")
+
+  if (is.null(cmd_df) || NROW(cmd_df) == 0) return(character(0))
+
+  status = rep("ok", NROW(cmd_df))
+  is_reg = rrd_as_logical(cmd_df$is_reg)
+  status[!is_reg] = NA_character_
+
+  has_error = vapply(seq_len(NROW(cmd_df)), function(i) {
+    rrd_cmd_has_error(cmd_df[i, , drop = FALSE])
+  }, logical(1))
+
+  has_md = rep(FALSE, NROW(cmd_df))
+  if ("missing_data" %in% names(cmd_df)) has_md = has_md | rrd_as_logical(cmd_df$missing_data)
+  if ("run_missing_data" %in% names(cmd_df)) has_md = has_md | rrd_as_logical(cmd_df$run_missing_data)
+
+  status[has_error | has_md] = "not_run"
+
+  prob_runids = integer(0)
+  not_run_runids = integer(0)
+  ok_runids = integer(0)
+
+  regcheck = parcels$regcheck
+  if (!is.null(regcheck) && NROW(regcheck) > 0 && "runid" %in% names(regcheck)) {
+    df = as.data.frame(regcheck)
+
+    problem = rep(FALSE, NROW(df))
+    if ("reg_ok" %in% names(df)) problem = problem | !rrd_as_logical(df$reg_ok)
+    if ("problem" %in% names(df)) problem = problem | (!is.na(df$problem) & nzchar(as.character(df$problem)))
+    if ("comment" %in% names(df)) problem = problem | (!is.na(df$comment) & nzchar(as.character(df$comment)))
+
+    so_missing = rep(FALSE, NROW(df))
+    if ("so_did_run" %in% names(df)) {
+      so_missing = !rrd_as_logical(df$so_did_run)
+    }
+
+    prob_runids = unique(suppressWarnings(as.integer(df$runid[problem])))
+    not_run_runids = unique(suppressWarnings(as.integer(df$runid[so_missing])))
+    ok_runids = unique(suppressWarnings(as.integer(df$runid[!problem & !so_missing])))
+  }
+
+  for (i in seq_len(NROW(cmd_df))) {
+    if (is.na(status[i])) next
+
+    cmd = cmd_df[i, , drop = FALSE]
+    runids = rrd_cmd_runids(cmd, parcels = parcels)
+
+    if (length(runids) == 0) {
+      status[i] = "not_run"
+    } else {
+      if (any(runids %in% not_run_runids)) {
+         status[i] = "not_run"
+      } else if (any(runids %in% prob_runids)) {
+         status[i] = "issue"
+      } else if (any(runids %in% ok_runids)) {
+         status[i] = "ok"
+      } else {
+         if (status[i] == "ok") status[i] = "not_run"
+      }
+    }
+  }
+
+  status
 }
