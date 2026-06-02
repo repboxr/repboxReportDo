@@ -345,6 +345,8 @@ rrd_html_line_flags = function(cmd_df, n) {
     return(res)
   }
 
+  cmd_has_err = rrd_cmd_has_error(cmd_df)
+
   for (line_num in sort(unique(line[ok]))) {
     rows = which(ok & line == line_num)
     key = as.character(line_num)
@@ -365,7 +367,7 @@ rrd_html_line_flags = function(cmd_df, n) {
     res[[key]] = list(
       has_cmd = TRUE,
       is_reg = any(rrd_as_logical(cmd_df$is_reg[rows]), na.rm = TRUE),
-      has_error = any(vapply(rows, function(i) rrd_cmd_has_error(cmd_df[i, , drop = FALSE]), logical(1))),
+      has_error = any(cmd_has_err[rows], na.rm = TRUE),
       has_problem_reg = any(rrd_as_logical(cmd_df$rrd_has_problem_reg[rows]), na.rm = TRUE),
       reg_status = status,
       has_cache = has_cache
@@ -471,6 +473,8 @@ rrd_html_issue_df = function(cmd_df, parcels = list(), opts = rrd_opts()) {
   out = vector("list", NROW(cmd_df) * 2L)
   pos = 0L
 
+  cmd_has_err = rrd_cmd_has_error(cmd_df)
+
   for (i in seq_len(NROW(cmd_df))) {
     cmd = cmd_df[i, , drop = FALSE]
     line = suppressWarnings(as.integer(cmd$rrd_attach_line[1]))
@@ -480,7 +484,7 @@ rrd_html_issue_df = function(cmd_df, parcels = list(), opts = rrd_opts()) {
     show_error_issue = is_reg || isTRUE(opts$show_nonreg_issue_errors)
     cmdline = if ("cmdline" %in% names(cmd)) rrd_chr_vec(cmd$cmdline[1]) else ""
 
-    if (show_error_issue && rrd_cmd_has_error(cmd)) {
+    if (show_error_issue && cmd_has_err[i]) {
       err_txt = rrd_cmd_error_text(cmd)
       err_runids = rrd_cmd_error_runids(cmd, parcels = parcels)
       if (length(err_runids) == 0) err_runids = rrd_cmd_runids(cmd, parcels = parcels) # fallback
@@ -701,7 +705,7 @@ rrd_html_regcheck_title = function(flags) {
   )
 
   if (length(missing) > 0) {
-    if (isTRUE(flags$sb) && identical(flags$sb_num_coef, 0L) && !isTRUE(flags$rb)) {
+    if (isTRUE(flags$sb) && (is.na(flags$sb_num_coef) || identical(flags$sb_num_coef, 0L)) && !isTRUE(flags$rb)) {
       title = paste0(if (!isTRUE(flags$so)) "so missing, " else "", "sb coefs missing, no rb")
       return(title)
     }
@@ -764,7 +768,7 @@ rrd_html_regcheck_summary = function(flags, row) {
   restore.point("rrd_html_regcheck_summary")
 
   if (!isTRUE(flags$so) || !isTRUE(flags$sb) || !isTRUE(flags$rb)) {
-    if (isTRUE(flags$sb) && identical(flags$sb_num_coef, 0L) && !isTRUE(flags$rb)) {
+    if (isTRUE(flags$sb) && (is.na(flags$sb_num_coef) || identical(flags$sb_num_coef, 0L)) && !isTRUE(flags$rb)) {
       return(paste0(if (!isTRUE(flags$so)) "Original so missing. " else "", "Stata base (sb) ran but yielded no coefficients, preventing R base (rb) execution."))
     }
 
@@ -1174,9 +1178,7 @@ rrd_html_summary_df = function(cmd_df, issue_df = NULL, parcels = list(), opts =
     ))
   }
 
-  cmd_runids = lapply(seq_len(NROW(cmd_df)), function(i) {
-    rrd_cmd_runids(cmd_df[i, , drop = FALSE], parcels = parcels)
-  })
+  cmd_runids = rrd_cmd_all_runids(cmd_df)
 
   n_runs = lengths(cmd_runids)
   n_runs[n_runs == 0] = 1L # Fallback so command is at least counted once if it didn't run
@@ -1229,7 +1231,7 @@ rrd_html_summary_df = function(cmd_df, issue_df = NULL, parcels = list(), opts =
   runs_md = vapply(cmd_runids, function(ids) sum(ids %in% md_runids), integer(1))
 
   # Use booleans if a command didn't output a runid but has an error flag (e.g. compile error)
-  has_cmd_err = vapply(seq_len(NROW(cmd_df)), function(i) rrd_cmd_has_error(cmd_df[i,,drop=FALSE]), logical(1))
+  has_cmd_err = rrd_cmd_has_error(cmd_df)
 
   has_cmd_md = rep(FALSE, NROW(cmd_df))
   if ("missing_data" %in% names(cmd_df)) has_cmd_md = has_cmd_md | rrd_as_logical(cmd_df$missing_data)
@@ -1385,9 +1387,7 @@ rrd_html_missing_dataset_df = function(cmd_df, parcels = list(), opts = rrd_opts
 
   if (is.null(cmd_df) || NROW(cmd_df) == 0) return(empty)
 
-  has_error = vapply(seq_len(NROW(cmd_df)), function(i) {
-    rrd_cmd_has_error(cmd_df[i, , drop = FALSE])
-  }, logical(1))
+  has_error = rrd_cmd_has_error(cmd_df)
 
   if (!any(has_error)) return(empty)
 
@@ -1803,9 +1803,7 @@ rrd_html_render_do_file = function(do_row, cmd_df, parcels, opts, file_idx = 1L)
       problem_lines = problem_lines[!is.na(problem_lines) & problem_lines > 0]
     }
 
-    error_rows = vapply(seq_len(NROW(cmd_df)), function(i) {
-      rrd_cmd_has_error(cmd_df[i, , drop = FALSE])
-    }, logical(1))
+    error_rows = rrd_cmd_has_error(cmd_df)
 
     if (any(error_rows)) {
       error_lines = suppressWarnings(as.integer(cmd_df$rrd_attach_line[error_rows]))

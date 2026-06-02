@@ -1017,24 +1017,29 @@ rrd_regcheck_text = function(runids, parcels = list(), opts = rrd_opts()) {
 rrd_cmd_has_error = function(cmd) {
   restore.point("rrd_cmd_has_error")
 
+  if (NROW(cmd) == 0) return(logical(0))
+  has_err = rep(FALSE, NROW(cmd))
+
   err_fields = intersect(c("errcode", "rc", "error_code", "stata_rc", "run_errcode", "run_rc"), names(cmd))
   for (field in err_fields) {
     any_field = paste0("any_", field)
     if (any_field %in% names(cmd)) {
-       if (isTRUE(cmd[[any_field]][1])) return(TRUE)
+       has_err = has_err | rrd_as_logical(cmd[[any_field]])
     } else {
-       val = suppressWarnings(as.numeric(cmd[[field]][1]))
-       if (!is.na(val) && val != 0) return(TRUE)
+       val = suppressWarnings(as.numeric(cmd[[field]]))
+       val[is.na(val)] = 0
+       has_err = has_err | (val != 0)
     }
   }
 
   msg_fields = intersect(c("err_msg", "error_msg", "error", "stderr", "run_err_msg", "run_error_msg"), names(cmd))
   for (field in msg_fields) {
-    val = rrd_chr_vec(cmd[[field]][1])
-    if (length(val) > 0 && any(nzchar(val))) return(TRUE)
+    val = as.character(cmd[[field]])
+    val[is.na(val)] = ""
+    has_err = has_err | nzchar(val)
   }
 
-  FALSE
+  has_err
 }
 rrd_cmd_error_runids = function(cmd, parcels = list()) {
   restore.point("rrd_cmd_error_runids")
@@ -1115,12 +1120,61 @@ rrd_cmd_has_run_output = function(cmd_df, parcels = list(), opts = rrd_opts()) {
 
   if (is.null(cmd_df) || NROW(cmd_df) == 0) return(logical(0))
 
-  vapply(seq_len(NROW(cmd_df)), function(i) {
-    cmd = cmd_df[i, , drop = FALSE]
-    runids = rrd_cmd_runids(cmd, parcels = parcels)
-    nzchar(rrd_cmd_inline_output_text(cmd)) ||
-      nzchar(rrd_stata_run_log_text(runids = runids, parcels = parcels, opts = opts))
-  }, logical(1))
+  has_out = rep(FALSE, NROW(cmd_df))
+
+  text_cols = intersect(
+    c("log", "logtxt", "log_text", "cmd_log", "output", "out", "stdout", "stderr",
+      "text", "result", "msg", "message", "err_msg", "error_msg",
+      "run_log", "run_logtxt", "run_log_text", "run_cmd_log", "run_output",
+      "run_out", "run_stdout", "run_stderr", "run_text", "run_result",
+      "run_msg", "run_message", "run_err_msg", "run_error_msg"),
+    names(cmd_df)
+  )
+
+  for (col in text_cols) {
+    val = as.character(cmd_df[[col]])
+    val[is.na(val)] = ""
+    has_out = has_out | nzchar(val)
+  }
+
+  run_log = parcels$stata_run_log
+  if (!is.null(run_log) && NROW(run_log) > 0 && "runid" %in% names(run_log)) {
+     run_log_df = as.data.frame(run_log)
+
+     log_text_cols = intersect(
+       c("log", "logtxt", "log_text", "cmd_log", "output", "out", "stdout", "stderr",
+         "text", "result", "msg", "message", "err_msg", "error_msg"),
+       names(run_log_df)
+     )
+
+     log_has_text = rep(FALSE, NROW(run_log_df))
+     for (col in log_text_cols) {
+        val = as.character(run_log_df[[col]])
+        val[is.na(val)] = ""
+        log_has_text = log_has_text | nzchar(val)
+     }
+
+     file_cols = intersect(
+       c("log_file", "file", "path", "log_path", "smcl_file", "txt_file"),
+       names(run_log_df)
+     )
+     for (col in file_cols) {
+        val = as.character(run_log_df[[col]])
+        val[is.na(val)] = ""
+        log_has_text = log_has_text | nzchar(val)
+     }
+
+     valid_runids = suppressWarnings(as.integer(run_log_df$runid[log_has_text]))
+     valid_runids = valid_runids[!is.na(valid_runids)]
+
+     if (length(valid_runids) > 0) {
+        all_runids = rrd_cmd_all_runids(cmd_df)
+        has_log_out = vapply(all_runids, function(ids) any(ids %in% valid_runids), logical(1))
+        has_out = has_out | has_log_out
+     }
+  }
+
+  has_out
 }
 
 
@@ -1173,10 +1227,9 @@ rrd_has_problem_reg = function(cmd_df, parcels = list()) {
   }
 
   prob_runids = unique(suppressWarnings(as.integer(df$runid[problem])))
+  all_runids = rrd_cmd_all_runids(cmd_df)
 
-  vapply(seq_len(NROW(cmd_df)), function(i) {
-    cmd = cmd_df[i, , drop = FALSE]
-    runids = rrd_cmd_runids(cmd, parcels = parcels)
+  vapply(all_runids, function(runids) {
     any(runids %in% prob_runids)
   }, logical(1))
 }
@@ -1316,9 +1369,7 @@ rrd_cmd_reg_status = function(cmd_df, parcels = list()) {
   is_reg = rrd_as_logical(cmd_df$is_reg)
   status[!is_reg] = NA_character_
 
-  has_error = vapply(seq_len(NROW(cmd_df)), function(i) {
-    rrd_cmd_has_error(cmd_df[i, , drop = FALSE])
-  }, logical(1))
+  has_error = rrd_cmd_has_error(cmd_df)
 
   has_md = rep(FALSE, NROW(cmd_df))
   if ("missing_data" %in% names(cmd_df)) has_md = has_md | rrd_as_logical(cmd_df$missing_data)
@@ -1349,11 +1400,12 @@ rrd_cmd_reg_status = function(cmd_df, parcels = list()) {
     ok_runids = unique(suppressWarnings(as.integer(df$runid[!problem & !so_missing])))
   }
 
+  all_runids = rrd_cmd_all_runids(cmd_df)
+
   for (i in seq_len(NROW(cmd_df))) {
     if (is.na(status[i])) next
 
-    cmd = cmd_df[i, , drop = FALSE]
-    runids = rrd_cmd_runids(cmd, parcels = parcels)
+    runids = all_runids[[i]]
 
     if (length(runids) == 0) {
       status[i] = "not_run"
@@ -1371,4 +1423,33 @@ rrd_cmd_reg_status = function(cmd_df, parcels = list()) {
   }
 
   status
+}
+
+rrd_cmd_all_runids = function(cmd_df) {
+  restore.point("rrd_cmd_all_runids")
+  if (NROW(cmd_df) == 0) return(list())
+
+  res = vector("list", NROW(cmd_df))
+  for (i in seq_along(res)) res[[i]] = integer(0)
+
+  if ("all_runids" %in% names(cmd_df) && is.list(cmd_df$all_runids)) {
+     for (i in seq_along(res)) {
+        res[[i]] = suppressWarnings(as.integer(cmd_df$all_runids[[i]]))
+     }
+  }
+
+  if ("runid" %in% names(cmd_df)) {
+     r = suppressWarnings(as.integer(cmd_df$runid))
+     for (i in seq_along(res)) if (!is.na(r[i])) res[[i]] = c(res[[i]], r[i])
+  }
+
+  if ("run_runid" %in% names(cmd_df)) {
+     r = suppressWarnings(as.integer(cmd_df$run_runid))
+     for (i in seq_along(res)) if (!is.na(r[i])) res[[i]] = c(res[[i]], r[i])
+  }
+
+  lapply(res, function(x) {
+     x = unique(x)
+     x[!is.na(x)]
+  })
 }
