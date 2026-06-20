@@ -89,9 +89,24 @@ rrd_html_do = function(
   if (NROW(cmd_df) > 0) {
     cmd_df$rrd_has_run_output = rrd_cmd_has_run_output(cmd_df, parcels, opts = opts)
     cmd_df$rrd_has_problem_reg = rrd_has_problem_reg(cmd_df, parcels = parcels)
+    cmd_df$rrd_reg_status = rrd_cmd_reg_status(cmd_df, parcels = parcels)
+
+    cache_dir = file.path(project_dir, "drf", "cached_dta")
+    cache_runids = integer(0)
+    if (dir.exists(cache_dir)) {
+      cache_files = list.files(cache_dir, pattern = "_cache\\.dta$")
+      cache_runids = suppressWarnings(as.integer(stringi::stri_replace_first_regex(cache_files, "_cache\\.dta$", "")))
+      cache_runids = cache_runids[!is.na(cache_runids)]
+    }
+    cmd_df$rrd_has_cache = vapply(seq_len(NROW(cmd_df)), function(i) {
+      runids = rrd_cmd_runids(cmd_df[i, , drop = FALSE], parcels = parcels)
+      any(runids %in% cache_runids)
+    }, logical(1))
   } else {
     cmd_df$rrd_has_run_output = logical(0)
     cmd_df$rrd_has_problem_reg = logical(0)
+    cmd_df$rrd_reg_status = character(0)
+    cmd_df$rrd_has_cache = logical(0)
   }
 
   if (NROW(do_df) > 0) {
@@ -269,12 +284,30 @@ rrd_html_do_file_pane = function(do_row, cmd_df, parcels, opts, active = FALSE) 
     flags = line_flags[[key]]
 
     line_class = c("rrd-code-row")
-    if (isTRUE(flags$is_reg)) line_class = c(line_class, "rrd-reg-line")
     if (isTRUE(flags$has_error)) line_class = c(line_class, "rrd-error-line")
-    if (isTRUE(flags$has_problem_reg)) line_class = c(line_class, "rrd-problem-reg-line")
+
+    if (isTRUE(flags$is_reg)) {
+      if (identical(flags$reg_status, "ok")) {
+        line_class = c(line_class, "rrd-reg-line-ok")
+      } else if (identical(flags$reg_status, "issue")) {
+        line_class = c(line_class, "rrd-reg-line-issue", "rrd-problem-reg-line")
+      } else if (identical(flags$reg_status, "not_run")) {
+        line_class = c(line_class, "rrd-reg-line-not-run")
+      } else {
+        line_class = c(line_class, "rrd-reg-line")
+      }
+    } else if (isTRUE(flags$has_problem_reg)) {
+       line_class = c(line_class, "rrd-problem-reg-line")
+    }
+
     if (!isTRUE(flags$has_cmd)) line_class = c(line_class, "rrd-no-command-line")
 
     extra_html = output_by_line[[key]]
+
+    cache_html = NULL
+    if (isTRUE(flags$has_cache)) {
+      cache_html = htmltools::tags$span(class = "rrd-cache-icon", title = "Cache file exists", "\U0001F4C1")
+    }
 
     line_nodes[[line_num]] = htmltools::tags$div(
       id = paste0("rrd-line-", file_idx, "-", line_num),
@@ -287,6 +320,7 @@ rrd_html_do_file_pane = function(do_row, cmd_df, parcels, opts, active = FALSE) 
       ),
       htmltools::tags$span(
         class = "rrd-code-cell",
+        cache_html,
         htmltools::tags$code(
           class = "rrd-code-text",
           lines[[line_num]]
@@ -326,7 +360,9 @@ rrd_html_line_flags = function(cmd_df, n) {
     has_cmd = FALSE,
     is_reg = FALSE,
     has_error = FALSE,
-    has_problem_reg = FALSE
+    has_problem_reg = FALSE,
+    reg_status = NA_character_,
+    has_cache = FALSE
   )
   res = rep(list(empty_flag), n)
   names(res) = as.character(seq_len(n))
@@ -342,14 +378,32 @@ rrd_html_line_flags = function(cmd_df, n) {
     return(res)
   }
 
+  cmd_has_err = rrd_cmd_has_error(cmd_df)
+
   for (line_num in sort(unique(line[ok]))) {
     rows = which(ok & line == line_num)
     key = as.character(line_num)
+
+    statuses = cmd_df$rrd_reg_status[rows]
+    statuses = statuses[!is.na(statuses)]
+    status = if (length(statuses) > 0) {
+      if ("not_run" %in% statuses) "not_run"
+      else if ("issue" %in% statuses) "issue"
+      else "ok"
+    } else NA_character_
+
+    has_cache = FALSE
+    if ("rrd_has_cache" %in% names(cmd_df)) {
+       has_cache = any(rrd_as_logical(cmd_df$rrd_has_cache[rows]), na.rm = TRUE)
+    }
+
     res[[key]] = list(
       has_cmd = TRUE,
       is_reg = any(rrd_as_logical(cmd_df$is_reg[rows]), na.rm = TRUE),
-      has_error = any(vapply(rows, function(i) rrd_cmd_has_error(cmd_df[i, , drop = FALSE]), logical(1))),
-      has_problem_reg = any(rrd_as_logical(cmd_df$rrd_has_problem_reg[rows]), na.rm = TRUE)
+      has_error = any(cmd_has_err[rows], na.rm = TRUE),
+      has_problem_reg = any(rrd_as_logical(cmd_df$rrd_has_problem_reg[rows]), na.rm = TRUE),
+      reg_status = status,
+      has_cache = has_cache
     )
   }
 
@@ -452,6 +506,8 @@ rrd_html_issue_df = function(cmd_df, parcels = list(), opts = rrd_opts()) {
   out = vector("list", NROW(cmd_df) * 2L)
   pos = 0L
 
+  cmd_has_err = rrd_cmd_has_error(cmd_df)
+
   for (i in seq_len(NROW(cmd_df))) {
     cmd = cmd_df[i, , drop = FALSE]
     line = suppressWarnings(as.integer(cmd$rrd_attach_line[1]))
@@ -461,7 +517,7 @@ rrd_html_issue_df = function(cmd_df, parcels = list(), opts = rrd_opts()) {
     show_error_issue = is_reg || isTRUE(opts$show_nonreg_issue_errors)
     cmdline = if ("cmdline" %in% names(cmd)) rrd_chr_vec(cmd$cmdline[1]) else ""
 
-    if (show_error_issue && rrd_cmd_has_error(cmd)) {
+    if (show_error_issue && cmd_has_err[i]) {
       err_txt = rrd_cmd_error_text(cmd)
       err_runids = rrd_cmd_error_runids(cmd, parcels = parcels)
       if (length(err_runids) == 0) err_runids = rrd_cmd_runids(cmd, parcels = parcels) # fallback
@@ -641,6 +697,20 @@ rrd_html_regcheck_flags = function(row) {
     if (is.na(val)) "" else val
   }
 
+  get_num = function(name, default = NA_real_) {
+    if (!name %in% names(row)) return(default)
+    val = suppressWarnings(as.numeric(row[[name]][1]))
+    if (is.na(val)) return(default)
+    val
+  }
+
+  get_int = function(name, default = NA_integer_) {
+    if (!name %in% names(row)) return(default)
+    val = suppressWarnings(as.integer(row[[name]][1]))
+    if (is.na(val)) return(default)
+    val
+  }
+
   list(
     so = get_bool("so_did_run"),
     sb = get_bool("sb_did_run"),
@@ -650,6 +720,8 @@ rrd_html_regcheck_flags = function(row) {
     sb_so_same = get_bool("sb_so_identical", default = NA),
     rb_sb_coef_same = get_bool("rb_sb_coef_same", default = NA),
     rb_sb_se_same = get_bool("rb_sb_se_same", default = NA),
+    rb_sb_share_coeff_same = get_num("rb_sb_share_coeff_same"),
+    sb_num_coef = get_int("sb_num_coef"),
     problem = get_chr("problem"),
     comment = get_chr("comment")
   )
@@ -666,6 +738,11 @@ rrd_html_regcheck_title = function(flags) {
   )
 
   if (length(missing) > 0) {
+    if (isTRUE(flags$sb) && (is.na(flags$sb_num_coef) || identical(flags$sb_num_coef, 0L)) && !isTRUE(flags$rb)) {
+      title = paste0(if (!isTRUE(flags$so)) "so missing, " else "", "sb coefs missing, no rb")
+      return(title)
+    }
+
     title = paste0(rrd_html_join_words(missing), " missing")
     if (!isTRUE(flags$sb)) {
         if (isTRUE(flags$sb_raw)) {
@@ -680,7 +757,31 @@ rrd_html_regcheck_title = function(flags) {
   coef_bad = identical(flags$rb_sb_coef_same, FALSE)
   se_bad = identical(flags$rb_sb_se_same, FALSE)
 
-  if (coef_bad && se_bad) return("sb vs rb coef/se mismatch")
+  if (coef_bad && se_bad) {
+    title = "sb vs rb coef/se mismatch"
+
+    share_same = suppressWarnings(as.numeric(flags$rb_sb_share_coeff_same))
+    sb_num_coef = suppressWarnings(as.integer(flags$sb_num_coef))
+
+    details = character(0)
+
+    if (!is.na(share_same)) {
+      share_not_same = 100 * (1 - share_same)
+      digits = if (abs(share_not_same) < 10) 1L else 0L
+      share_not_same_txt = formatC(share_not_same, digits = digits, format = "f")
+      details = c(details, paste0(share_not_same_txt, "% coeffs differ"))
+    }
+
+    if (!is.na(sb_num_coef)) {
+      details = c(details, paste0(sb_num_coef, " sb coefs"))
+    }
+
+    if (length(details) > 0) {
+      title = paste0(title, " (", paste0(details, collapse = ", "), ")")
+    }
+
+    return(title)
+  }
   if (coef_bad) return("sb vs rb coef mismatch")
   if (se_bad) return("sb vs rb SE mismatch")
 
@@ -700,6 +801,10 @@ rrd_html_regcheck_summary = function(flags, row) {
   restore.point("rrd_html_regcheck_summary")
 
   if (!isTRUE(flags$so) || !isTRUE(flags$sb) || !isTRUE(flags$rb)) {
+    if (isTRUE(flags$sb) && (is.na(flags$sb_num_coef) || identical(flags$sb_num_coef, 0L)) && !isTRUE(flags$rb)) {
+      return(paste0(if (!isTRUE(flags$so)) "Original so missing. " else "", "Stata base (sb) ran but yielded no coefficients, preventing R base (rb) execution."))
+    }
+
     missing = c(
       if (!isTRUE(flags$so)) "so" else character(0),
       if (!isTRUE(flags$sb)) "sb" else character(0),
@@ -1106,9 +1211,7 @@ rrd_html_summary_df = function(cmd_df, issue_df = NULL, parcels = list(), opts =
     ))
   }
 
-  cmd_runids = lapply(seq_len(NROW(cmd_df)), function(i) {
-    rrd_cmd_runids(cmd_df[i, , drop = FALSE], parcels = parcels)
-  })
+  cmd_runids = rrd_cmd_all_runids(cmd_df)
 
   n_runs = lengths(cmd_runids)
   n_runs[n_runs == 0] = 1L # Fallback so command is at least counted once if it didn't run
@@ -1161,7 +1264,7 @@ rrd_html_summary_df = function(cmd_df, issue_df = NULL, parcels = list(), opts =
   runs_md = vapply(cmd_runids, function(ids) sum(ids %in% md_runids), integer(1))
 
   # Use booleans if a command didn't output a runid but has an error flag (e.g. compile error)
-  has_cmd_err = vapply(seq_len(NROW(cmd_df)), function(i) rrd_cmd_has_error(cmd_df[i,,drop=FALSE]), logical(1))
+  has_cmd_err = rrd_cmd_has_error(cmd_df)
 
   has_cmd_md = rep(FALSE, NROW(cmd_df))
   if ("missing_data" %in% names(cmd_df)) has_cmd_md = has_cmd_md | rrd_as_logical(cmd_df$missing_data)
@@ -1317,9 +1420,7 @@ rrd_html_missing_dataset_df = function(cmd_df, parcels = list(), opts = rrd_opts
 
   if (is.null(cmd_df) || NROW(cmd_df) == 0) return(empty)
 
-  has_error = vapply(seq_len(NROW(cmd_df)), function(i) {
-    rrd_cmd_has_error(cmd_df[i, , drop = FALSE])
-  }, logical(1))
+  has_error = rrd_cmd_has_error(cmd_df)
 
   if (!any(has_error)) return(empty)
 
@@ -1705,17 +1806,29 @@ rrd_html_render_do_file = function(do_row, cmd_df, parcels, opts, file_idx = 1L)
   output_by_line = rrd_outputs_by_line(cmd_df, parcels = parcels, opts = opts)
 
   attach_line = integer(0)
-  reg_lines = integer(0)
+  reg_ok_lines = integer(0)
+  reg_issue_lines = integer(0)
+  reg_not_run_lines = integer(0)
   problem_lines = integer(0)
   error_lines = integer(0)
+  cache_lines = integer(0)
 
   if (!is.null(cmd_df) && NROW(cmd_df) > 0) {
     attach_line = suppressWarnings(as.integer(cmd_df$rrd_attach_line))
     attach_line = attach_line[!is.na(attach_line) & attach_line > 0]
 
-    if ("is_reg" %in% names(cmd_df)) {
-      reg_lines = suppressWarnings(as.integer(cmd_df$rrd_attach_line[rrd_as_logical(cmd_df$is_reg)]))
-      reg_lines = reg_lines[!is.na(reg_lines) & reg_lines > 0]
+    if ("rrd_reg_status" %in% names(cmd_df)) {
+       reg_ok_lines = suppressWarnings(as.integer(cmd_df$rrd_attach_line[cmd_df$rrd_reg_status == "ok"]))
+       reg_ok_lines = reg_ok_lines[!is.na(reg_ok_lines) & reg_ok_lines > 0]
+
+       reg_issue_lines = suppressWarnings(as.integer(cmd_df$rrd_attach_line[cmd_df$rrd_reg_status == "issue"]))
+       reg_issue_lines = reg_issue_lines[!is.na(reg_issue_lines) & reg_issue_lines > 0]
+
+       reg_not_run_lines = suppressWarnings(as.integer(cmd_df$rrd_attach_line[cmd_df$rrd_reg_status == "not_run"]))
+       reg_not_run_lines = reg_not_run_lines[!is.na(reg_not_run_lines) & reg_not_run_lines > 0]
+    } else if ("is_reg" %in% names(cmd_df)) {
+       reg_ok_lines = suppressWarnings(as.integer(cmd_df$rrd_attach_line[rrd_as_logical(cmd_df$is_reg)]))
+       reg_ok_lines = reg_ok_lines[!is.na(reg_ok_lines) & reg_ok_lines > 0]
     }
 
     if ("rrd_has_problem_reg" %in% names(cmd_df)) {
@@ -1723,13 +1836,16 @@ rrd_html_render_do_file = function(do_row, cmd_df, parcels, opts, file_idx = 1L)
       problem_lines = problem_lines[!is.na(problem_lines) & problem_lines > 0]
     }
 
-    error_rows = vapply(seq_len(NROW(cmd_df)), function(i) {
-      rrd_cmd_has_error(cmd_df[i, , drop = FALSE])
-    }, logical(1))
+    error_rows = rrd_cmd_has_error(cmd_df)
 
     if (any(error_rows)) {
       error_lines = suppressWarnings(as.integer(cmd_df$rrd_attach_line[error_rows]))
       error_lines = error_lines[!is.na(error_lines) & error_lines > 0]
+    }
+
+    if ("rrd_has_cache" %in% names(cmd_df)) {
+       cache_lines = suppressWarnings(as.integer(cmd_df$rrd_attach_line[rrd_as_logical(cmd_df$rrd_has_cache)]))
+       cache_lines = cache_lines[!is.na(cache_lines) & cache_lines > 0]
     }
   }
 
@@ -1738,9 +1854,22 @@ rrd_html_render_do_file = function(do_row, cmd_df, parcels, opts, file_idx = 1L)
 
   for (i in seq_along(lines)) {
     line_class = "rrd-code-row"
-    if (i %in% reg_lines) line_class = paste(line_class, "rrd-reg-line")
-    if (i %in% problem_lines) line_class = paste(line_class, "rrd-problem-reg-line")
     if (i %in% error_lines) line_class = paste(line_class, "rrd-error-line")
+
+    if (i %in% reg_ok_lines) {
+       line_class = paste(line_class, "rrd-reg-line-ok")
+    } else if (i %in% reg_issue_lines) {
+       line_class = paste(line_class, "rrd-reg-line-issue", "rrd-problem-reg-line")
+    } else if (i %in% reg_not_run_lines) {
+       line_class = paste(line_class, "rrd-reg-line-not-run")
+    } else if (i %in% problem_lines) {
+       line_class = paste(line_class, "rrd-problem-reg-line")
+    }
+
+    cache_html = NULL
+    if (i %in% cache_lines) {
+      cache_html = htmltools::tags$span(class = "rrd-cache-icon", title = "Cache file exists", "\U0001F4C1 ")
+    }
 
     pos = pos + 1L
     line_nodes[[pos]] = htmltools::tags$div(
@@ -1754,6 +1883,7 @@ rrd_html_render_do_file = function(do_row, cmd_df, parcels, opts, file_idx = 1L)
       ),
       htmltools::tags$pre(
         class = "rrd-do-pre",
+        cache_html,
         htmltools::tags$code(lines[i])
       )
     )
@@ -1902,6 +2032,13 @@ rrd_opts = function(
 # problems in the repbox pipeline for reproductions including metaregBase
 # replications. HTML reports that are easier for humans to read can be
 # generated with rrd_html_do instead.
+# A plain text "report" that shows original do files combined with selected
+# output information as specified by opts.
+#
+# The plain version is mainly intended as a diagnostic tool for AI to detect
+# problems in the repbox pipeline for reproductions including metaregBase
+# replications. HTML reports that are easier for humans to read can be
+# generated with rrd_html_do instead.
 rrd_plain_do = function(
   project_dir,
   parcels = list(),
@@ -1937,9 +2074,24 @@ rrd_plain_do = function(
   if (NROW(cmd_df) > 0) {
     cmd_df$rrd_has_run_output = rrd_cmd_has_run_output(cmd_df, parcels, opts = opts)
     cmd_df$rrd_has_problem_reg = rrd_has_problem_reg(cmd_df, parcels = parcels)
+    cmd_df$rrd_reg_status = rrd_cmd_reg_status(cmd_df, parcels = parcels)
+
+    cache_dir = file.path(project_dir, "drf", "cached_dta")
+    cache_runids = integer(0)
+    if (dir.exists(cache_dir)) {
+      cache_files = list.files(cache_dir, pattern = "_cache\\.dta$")
+      cache_runids = suppressWarnings(as.integer(stringi::stri_replace_first_regex(cache_files, "_cache\\.dta$", "")))
+      cache_runids = cache_runids[!is.na(cache_runids)]
+    }
+    cmd_df$rrd_has_cache = vapply(seq_len(NROW(cmd_df)), function(i) {
+      runids = rrd_cmd_runids(cmd_df[i, , drop = FALSE], parcels = parcels)
+      any(runids %in% cache_runids)
+    }, logical(1))
   } else {
     cmd_df$rrd_has_run_output = logical(0)
     cmd_df$rrd_has_problem_reg = logical(0)
+    cmd_df$rrd_reg_status = character(0)
+    cmd_df$rrd_has_cache = logical(0)
   }
 
   if (NROW(do_df) == 0) {
@@ -2847,24 +2999,29 @@ rrd_regcheck_text = function(runids, parcels = list(), opts = rrd_opts()) {
 rrd_cmd_has_error = function(cmd) {
   restore.point("rrd_cmd_has_error")
 
+  if (NROW(cmd) == 0) return(logical(0))
+  has_err = rep(FALSE, NROW(cmd))
+
   err_fields = intersect(c("errcode", "rc", "error_code", "stata_rc", "run_errcode", "run_rc"), names(cmd))
   for (field in err_fields) {
     any_field = paste0("any_", field)
     if (any_field %in% names(cmd)) {
-       if (isTRUE(cmd[[any_field]][1])) return(TRUE)
+       has_err = has_err | rrd_as_logical(cmd[[any_field]])
     } else {
-       val = suppressWarnings(as.numeric(cmd[[field]][1]))
-       if (!is.na(val) && val != 0) return(TRUE)
+       val = suppressWarnings(as.numeric(cmd[[field]]))
+       val[is.na(val)] = 0
+       has_err = has_err | (val != 0)
     }
   }
 
   msg_fields = intersect(c("err_msg", "error_msg", "error", "stderr", "run_err_msg", "run_error_msg"), names(cmd))
   for (field in msg_fields) {
-    val = rrd_chr_vec(cmd[[field]][1])
-    if (length(val) > 0 && any(nzchar(val))) return(TRUE)
+    val = as.character(cmd[[field]])
+    val[is.na(val)] = ""
+    has_err = has_err | nzchar(val)
   }
 
-  FALSE
+  has_err
 }
 rrd_cmd_error_runids = function(cmd, parcels = list()) {
   restore.point("rrd_cmd_error_runids")
@@ -2945,12 +3102,61 @@ rrd_cmd_has_run_output = function(cmd_df, parcels = list(), opts = rrd_opts()) {
 
   if (is.null(cmd_df) || NROW(cmd_df) == 0) return(logical(0))
 
-  vapply(seq_len(NROW(cmd_df)), function(i) {
-    cmd = cmd_df[i, , drop = FALSE]
-    runids = rrd_cmd_runids(cmd, parcels = parcels)
-    nzchar(rrd_cmd_inline_output_text(cmd)) ||
-      nzchar(rrd_stata_run_log_text(runids = runids, parcels = parcels, opts = opts))
-  }, logical(1))
+  has_out = rep(FALSE, NROW(cmd_df))
+
+  text_cols = intersect(
+    c("log", "logtxt", "log_text", "cmd_log", "output", "out", "stdout", "stderr",
+      "text", "result", "msg", "message", "err_msg", "error_msg",
+      "run_log", "run_logtxt", "run_log_text", "run_cmd_log", "run_output",
+      "run_out", "run_stdout", "run_stderr", "run_text", "run_result",
+      "run_msg", "run_message", "run_err_msg", "run_error_msg"),
+    names(cmd_df)
+  )
+
+  for (col in text_cols) {
+    val = as.character(cmd_df[[col]])
+    val[is.na(val)] = ""
+    has_out = has_out | nzchar(val)
+  }
+
+  run_log = parcels$stata_run_log
+  if (!is.null(run_log) && NROW(run_log) > 0 && "runid" %in% names(run_log)) {
+     run_log_df = as.data.frame(run_log)
+
+     log_text_cols = intersect(
+       c("log", "logtxt", "log_text", "cmd_log", "output", "out", "stdout", "stderr",
+         "text", "result", "msg", "message", "err_msg", "error_msg"),
+       names(run_log_df)
+     )
+
+     log_has_text = rep(FALSE, NROW(run_log_df))
+     for (col in log_text_cols) {
+        val = as.character(run_log_df[[col]])
+        val[is.na(val)] = ""
+        log_has_text = log_has_text | nzchar(val)
+     }
+
+     file_cols = intersect(
+       c("log_file", "file", "path", "log_path", "smcl_file", "txt_file"),
+       names(run_log_df)
+     )
+     for (col in file_cols) {
+        val = as.character(run_log_df[[col]])
+        val[is.na(val)] = ""
+        log_has_text = log_has_text | nzchar(val)
+     }
+
+     valid_runids = suppressWarnings(as.integer(run_log_df$runid[log_has_text]))
+     valid_runids = valid_runids[!is.na(valid_runids)]
+
+     if (length(valid_runids) > 0) {
+        all_runids = rrd_cmd_all_runids(cmd_df)
+        has_log_out = vapply(all_runids, function(ids) any(ids %in% valid_runids), logical(1))
+        has_out = has_out | has_log_out
+     }
+  }
+
+  has_out
 }
 
 
@@ -3003,10 +3209,9 @@ rrd_has_problem_reg = function(cmd_df, parcels = list()) {
   }
 
   prob_runids = unique(suppressWarnings(as.integer(df$runid[problem])))
+  all_runids = rrd_cmd_all_runids(cmd_df)
 
-  vapply(seq_len(NROW(cmd_df)), function(i) {
-    cmd = cmd_df[i, , drop = FALSE]
-    runids = rrd_cmd_runids(cmd, parcels = parcels)
+  vapply(all_runids, function(runids) {
     any(runids %in% prob_runids)
   }, logical(1))
 }
@@ -3134,6 +3339,101 @@ rrd_safe_file_name = function(x) {
   if (!nzchar(x)) x = "do_file"
 
   x
+}
+
+
+rrd_cmd_reg_status = function(cmd_df, parcels = list()) {
+  restore.point("rrd_cmd_reg_status")
+
+  if (is.null(cmd_df) || NROW(cmd_df) == 0) return(character(0))
+
+  status = rep("ok", NROW(cmd_df))
+  is_reg = rrd_as_logical(cmd_df$is_reg)
+  status[!is_reg] = NA_character_
+
+  has_error = rrd_cmd_has_error(cmd_df)
+
+  has_md = rep(FALSE, NROW(cmd_df))
+  if ("missing_data" %in% names(cmd_df)) has_md = has_md | rrd_as_logical(cmd_df$missing_data)
+  if ("run_missing_data" %in% names(cmd_df)) has_md = has_md | rrd_as_logical(cmd_df$run_missing_data)
+
+  status[has_error | has_md] = "not_run"
+
+  prob_runids = integer(0)
+  not_run_runids = integer(0)
+  ok_runids = integer(0)
+
+  regcheck = parcels$regcheck
+  if (!is.null(regcheck) && NROW(regcheck) > 0 && "runid" %in% names(regcheck)) {
+    df = as.data.frame(regcheck)
+
+    problem = rep(FALSE, NROW(df))
+    if ("reg_ok" %in% names(df)) problem = problem | !rrd_as_logical(df$reg_ok)
+    if ("problem" %in% names(df)) problem = problem | (!is.na(df$problem) & nzchar(as.character(df$problem)))
+    if ("comment" %in% names(df)) problem = problem | (!is.na(df$comment) & nzchar(as.character(df$comment)))
+
+    so_missing = rep(FALSE, NROW(df))
+    if ("so_did_run" %in% names(df)) {
+      so_missing = !rrd_as_logical(df$so_did_run)
+    }
+
+    prob_runids = unique(suppressWarnings(as.integer(df$runid[problem])))
+    not_run_runids = unique(suppressWarnings(as.integer(df$runid[so_missing])))
+    ok_runids = unique(suppressWarnings(as.integer(df$runid[!problem & !so_missing])))
+  }
+
+  all_runids = rrd_cmd_all_runids(cmd_df)
+
+  for (i in seq_len(NROW(cmd_df))) {
+    if (is.na(status[i])) next
+
+    runids = all_runids[[i]]
+
+    if (length(runids) == 0) {
+      status[i] = "not_run"
+    } else {
+      if (any(runids %in% not_run_runids)) {
+         status[i] = "not_run"
+      } else if (any(runids %in% prob_runids)) {
+         status[i] = "issue"
+      } else if (any(runids %in% ok_runids)) {
+         status[i] = "ok"
+      } else {
+         if (status[i] == "ok") status[i] = "not_run"
+      }
+    }
+  }
+
+  status
+}
+
+rrd_cmd_all_runids = function(cmd_df) {
+  restore.point("rrd_cmd_all_runids")
+  if (NROW(cmd_df) == 0) return(list())
+
+  res = vector("list", NROW(cmd_df))
+  for (i in seq_along(res)) res[[i]] = integer(0)
+
+  if ("all_runids" %in% names(cmd_df) && is.list(cmd_df$all_runids)) {
+     for (i in seq_along(res)) {
+        res[[i]] = suppressWarnings(as.integer(cmd_df$all_runids[[i]]))
+     }
+  }
+
+  if ("runid" %in% names(cmd_df)) {
+     r = suppressWarnings(as.integer(cmd_df$runid))
+     for (i in seq_along(res)) if (!is.na(r[i])) res[[i]] = c(res[[i]], r[i])
+  }
+
+  if ("run_runid" %in% names(cmd_df)) {
+     r = suppressWarnings(as.integer(cmd_df$run_runid))
+     for (i in seq_along(res)) if (!is.na(r[i])) res[[i]] = c(res[[i]], r[i])
+  }
+
+  lapply(res, function(x) {
+     x = unique(x)
+     x[!is.na(x)]
+  })
 }
 ```
 # END OF FILE: /home/rstudio/repbox/repboxReportDo/R/rrd_plain.R
@@ -3472,7 +3772,7 @@ body {
 }
 
 .rrd-code-text {
-  display: block;
+  display: inline;
   margin: 0;
   padding: 0;
   white-space: pre-wrap;
@@ -3485,9 +3785,20 @@ body {
   -moz-tab-size: 1;
 }
 
-.rrd-reg-line .rrd-code-text {
+.rrd-reg-line .rrd-code-text,
+.rrd-reg-line-ok .rrd-code-text {
   font-weight: 700;
   color: #17602f;
+}
+
+.rrd-reg-line-issue .rrd-code-text {
+  font-weight: 700;
+  color: #d92d20;
+}
+
+.rrd-reg-line-not-run .rrd-code-text {
+  font-weight: 700;
+  color: #875bf7;
 }
 
 .rrd-error-line {
@@ -3504,6 +3815,13 @@ body {
 
 .rrd-problem-reg-line .rrd-line-num {
   color: #b54708;
+}
+
+.rrd-cache-icon {
+  font-size: 11.5px;
+  margin-right: 4px;
+  user-select: none;
+  display: inline-block;
 }
 
 .rrd-active-line {
@@ -4055,23 +4373,12 @@ Important: Try to always use absolute file paths in the file argument of the mod
 # Your Task
 ##################################
 
+Can you make new R files and function and possibly js and css files with prefix sr (summary report) that can do the following.
 
+Given a set of project directories generate a joint report that  summarizes issues in projects. Ideally group by issues and put more severe on top (sb not replicated, the rb does not run, then coef diffs but sorted by number of coef diffs, just SE diffs can be ignored). Think of a good design, possibly add some interactivity and background info, at least the runid and codelines.
 
-I have added to more fields in the regcheck parcel:
+Describe first your design ideas then provide the code. Try to create fully separate files, no dependency on current repboxReportDo. Make paths such that all generated files are stored in an R package with directory:  
 
-  rb_sb_share_coeff_same:
-    type: num
-    descr: |
-      Share of coefficients in rb and sb variant that are the same (up to tolerance)
-      That is relevant in so far that sometimes due to different
-      fixed effects only a few coefficients may differ.
-
-  sb_num_coef:
-    type: int
-    descr: |
-      The number of coefficients in the sb run
-      
-For issues of type "sb vs rb coef/se mismatch" can you add in the title the share of not same coeffs (% 2 sig digits, at most 1 decimal point) and number of sb coefs? So one can see faster whether it is likely just a limited fixed effect problem, or all coefs are wrong.
-
+/home/rstudio/repbox/repboxReportSummary
 
 
